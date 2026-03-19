@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Ledger — Personal Finance (Supabase)</title>
 <style>
+/* (same CSS as before – unchanged) */
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
 /* ── Variables ─────────────────────────────────────────────── */
@@ -380,7 +381,8 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
       <div class="login-title">LEDGER</div>
       <div class="login-subtitle">Personal Finance</div>
     </div>
-    <form id="login-form" onsubmit="Auth.handleSubmit(event);" class="login-form">
+    <!-- Removed inline onsubmit, we'll attach via JS -->
+    <form id="login-form" class="login-form">
       <input type="email" id="login-email" placeholder="Email" class="login-input" required autofocus/>
       <input type="password" id="login-password" placeholder="Password" class="login-input" required/>
       <button type="submit" id="login-btn" class="login-btn">Sign In</button>
@@ -388,7 +390,8 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
     </form>
     <div class="login-footer">
       <span id="login-toggle-text">Don't have an account? </span>
-      <a href="#" id="login-toggle-link" onclick="Auth.toggleMode(event)" style="color:var(--accent);text-decoration:none;cursor:pointer">Sign Up</a>
+      <!-- Removed inline onclick -->
+      <a href="#" id="login-toggle-link" style="color:var(--accent);text-decoration:none;cursor:pointer">Sign Up</a>
     </div>
   </div>
 </div>
@@ -1466,8 +1469,11 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
     async quickCreate(name,i){
       const type=prompt(`Create "${name}"\nType: Asset, Liability, Income, Expense`,'Asset');
       if(!type||!['Asset','Liability','Income','Expense'].includes(type))return;
-      const id=await DB.put('accounts',{name,type,description:'',opening_balance:0});
-      await this.loadAll();this.selectAc(i,id,name);Toast.show(`"${name}" created.`,'success');
+      const newAccount = await DB.accounts.add({name, type, description:'', opening_balance:0});
+      if (!newAccount) { Toast.show('Failed to create account.','error'); return; }
+      await this.loadAll();
+      this.selectAc(i, newAccount.id, name);
+      Toast.show(`"${name}" created.`,'success');
     },
     onAmtChange(i,field,val){
       State.voucherDirty=true;
@@ -1931,6 +1937,10 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
   window.Toast = Toast;
   window.Auth = Auth;
   window.App = App;
+
+  // Set up event listeners for login form (now that Auth exists)
+  document.getElementById('login-form').addEventListener('submit', (e) => Auth.handleSubmit(e));
+  document.getElementById('login-toggle-link').addEventListener('click', (e) => Auth.toggleMode(e));
 
   // Start the app
   const isAuth = await Auth.isAuthenticated();
