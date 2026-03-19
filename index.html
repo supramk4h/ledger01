@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Ledger — Personal Finance</title>
+<title>Ledger — Personal Finance (Supabase)</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
@@ -378,15 +378,18 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
     <div class="login-header">
       <div class="login-logo">🔐</div>
       <div class="login-title">LEDGER</div>
-      <div class="login-subtitle">Secure Access</div>
+      <div class="login-subtitle">Personal Finance</div>
     </div>
-    <form id="login-form" onsubmit="Auth.login(event);" class="login-form">
+    <form id="login-form" onsubmit="Auth.handleSubmit(event);" class="login-form">
       <input type="email" id="login-email" placeholder="Email" class="login-input" required autofocus/>
       <input type="password" id="login-password" placeholder="Password" class="login-input" required/>
-      <button type="submit" class="login-btn">Sign In</button>
+      <button type="submit" id="login-btn" class="login-btn">Sign In</button>
       <div id="login-error" class="login-error"></div>
     </form>
-    <div class="login-footer">Demo: use any email & password</div>
+    <div class="login-footer">
+      <span id="login-toggle-text">Don't have an account? </span>
+      <a href="#" id="login-toggle-link" onclick="Auth.toggleMode(event)" style="color:var(--accent);text-decoration:none;cursor:pointer">Sign Up</a>
+    </div>
   </div>
 </div>
 
@@ -459,1001 +462,1489 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
 </div>
 
 <script>
-/* ============================================================
-   DB layer
-============================================================ */
-const DB=(()=>{
-  const NAME='LedgerDB',VER=1;let db=null;
-  const open=()=>new Promise((res,rej)=>{
-    const req=indexedDB.open(NAME,VER);
-    req.onupgradeneeded=e=>{
-      const d=e.target.result;
-      if(!d.objectStoreNames.contains('accounts')){const s=d.createObjectStore('accounts',{keyPath:'id',autoIncrement:true});s.createIndex('name','name');s.createIndex('type','type');}
-      if(!d.objectStoreNames.contains('vouchers')){const s=d.createObjectStore('vouchers',{keyPath:'id',autoIncrement:true});s.createIndex('date','date');}
-      if(!d.objectStoreNames.contains('entries')){const s=d.createObjectStore('entries',{keyPath:'id',autoIncrement:true});s.createIndex('account_id','account_id');s.createIndex('voucher_id','voucher_id');}
-      if(!d.objectStoreNames.contains('settings'))d.createObjectStore('settings',{keyPath:'key'});
-    };
-    req.onsuccess=e=>{db=e.target.result;res(db);};req.onerror=rej;
-  });
-  const tx=(s,m='readonly')=>{const t=db.transaction(s,m);return{t,stores:Array.isArray(s)?s.map(x=>t.objectStore(x)):[t.objectStore(s)]};};
-  const all=s=>new Promise((res,rej)=>{const{stores}=tx(s);const r=stores[0].getAll();r.onsuccess=()=>res(r.result);r.onerror=rej;});
-  const put=(s,o)=>new Promise((res,rej)=>{const{t,stores}=tx(s,'readwrite');const r=stores[0].put(o);r.onsuccess=()=>res(r.result);r.onerror=rej;t.onerror=rej;});
-  const del=(s,k)=>new Promise((res,rej)=>{const{t,stores}=tx(s,'readwrite');const r=stores[0].delete(k);r.onsuccess=()=>res();r.onerror=rej;t.onerror=rej;});
-  const byIdx=(s,idx,v)=>new Promise((res,rej)=>{const{stores}=tx(s);const r=stores[0].index(idx).getAll(v);r.onsuccess=()=>res(r.result);r.onerror=rej;});
-  const clr=s=>new Promise((res,rej)=>{const{t,stores}=tx(s,'readwrite');const r=stores[0].clear();r.onsuccess=()=>res();r.onerror=rej;t.onerror=rej;});
-  return{open,all,put,del,byIdx,clr};
-})();
+// ============================================================
+// COMBINED SUPABASE INTEGRATION (client + db)
+// ============================================================
+(async function() {
+  const SUPABASE_URL = 'https://umswoglqoddirbxvhzbf.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVtc3dvZ2xxb2RkaXJieHZoemJmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MTYxNTEsImV4cCI6MjA4OTQ5MjE1MX0.eh5WWHo_Usa6D8FzLQakrvRc3mMWbA3qUU21ue03fTs';
 
-/* ============================================================
-   State & Cache
-============================================================ */
-const State={accounts:[],vouchers:[],entries:[],settings:{},dateFilter:{type:'month',from:null,to:null},searchQuery:'',currentPage:'dashboard',voucherDirty:false,savedLedgerAccId:null};
-const Cache={
-  map:new Map(),
-  rebuild(){this.map.clear();State.accounts.forEach(a=>this.map.set(a.id,a));},
-  get(id){return this.map.get(id);},
-  search(q){
-    if(!q)return State.accounts.slice(0,8);
-    const lq=q.toLowerCase();
-    const starts=State.accounts.filter(a=>a.name.toLowerCase().startsWith(lq)||Fmt.ac(a.id).toLowerCase().startsWith(lq));
-    const has=State.accounts.filter(a=>!starts.includes(a)&&(a.name.toLowerCase().includes(lq)||Fmt.ac(a.id).toLowerCase().includes(lq)));
-    return[...starts,...has].slice(0,8);
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2');
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  // Helper to get current user id (used by database functions)
+  async function getCurrentUserId() {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id;
   }
-};
 
-/* ============================================================
-   Accounting engine
-============================================================ */
-const Acct={
-  balance(acc,entries){
-    let dr=0,cr=0;entries.filter(e=>e.account_id===acc.id).forEach(e=>{dr+=e.debit||0;cr+=e.credit||0;});
-    const ob=acc.opening_balance||0;
-    return['Asset','Expense'].includes(acc.type)?(dr-cr+ob):(cr-dr+ob);
-  },
-  totalDr(e){return e.reduce((s,x)=>s+(x.debit||0),0);},
-  totalCr(e){return e.reduce((s,x)=>s+(x.credit||0),0);},
-  validate(rows){
-    const real=rows.filter(r=>!r._bal);
-    if(real.length<2)return'Voucher must have at least 2 entry rows.';
-    for(const r of real){
-      if(!r.account_id)return'All rows must have an account selected.';
-      if(r.debit>0&&r.credit>0)return'A row cannot have both Debit and Credit filled.';
-      if(!(r.debit>0)&&!(r.credit>0))return'Each row must have a Debit or Credit value.';
+  // ==========================================================
+  // SupabaseClient (from supabase-client.js)
+  // ==========================================================
+  const SupabaseClient = {
+    init: async () => { /* already initialized */ },
+    auth: {
+      signUp: async (email, password) => {
+        try {
+          const { data, error } = await supabase.auth.signUp({ email, password });
+          if (error) throw error;
+          return { success: true, user: data.user };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+      signIn: async (email, password) => {
+        try {
+          const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+          if (error) throw error;
+          return { success: true, session: data.session };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+      signOut: async () => {
+        try {
+          const { error } = await supabase.auth.signOut();
+          if (error) throw error;
+          return { success: true };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+      getCurrentUser: async () => {
+        try {
+          const { data: { user }, error } = await supabase.auth.getUser();
+          if (error) throw error;
+          return user;
+        } catch {
+          return null;
+        }
+      },
+      resetPassword: async (email) => {
+        try {
+          const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
+            redirectTo: `${window.location.origin}?type=recovery`
+          });
+          if (error) throw error;
+          return { success: true };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      }
+    },
+    users: {
+      getProfile: async (userId) => {
+        try {
+          const { data, error } = await supabase.from('users').select('*').eq('id', userId).single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      updateProfile: async (userId, updates) => {
+        try {
+          const { data, error } = await supabase.from('users').update(updates).eq('id', userId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      }
+    },
+    transactions: {
+      add: async (userId, transaction) => {
+        try {
+          const { data, error } = await supabase.from('transactions').insert({ user_id: userId, ...transaction }).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      get: async (userId, filters = {}) => {
+        try {
+          let query = supabase.from('transactions').select('*, categories(*)').eq('user_id', userId);
+          if (filters.startDate) query = query.gte('date', filters.startDate);
+          if (filters.endDate) query = query.lte('date', filters.endDate);
+          if (filters.categoryId) query = query.eq('category_id', filters.categoryId);
+          if (filters.type) query = query.eq('type', filters.type);
+          const { data, error } = await query.order('date', { ascending: false });
+          if (error) throw error;
+          return data;
+        } catch { return []; }
+      },
+      update: async (transactionId, updates) => {
+        try {
+          const { data, error } = await supabase.from('transactions').update(updates).eq('id', transactionId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      delete: async (transactionId) => {
+        try {
+          const { error } = await supabase.from('transactions').delete().eq('id', transactionId);
+          if (error) throw error;
+          return true;
+        } catch { return false; }
+      },
+      subscribe: (userId, callback) => {
+        return supabase.from(`transactions:user_id=eq.${userId}`).on('*', callback).subscribe();
+      }
+    },
+    categories: {
+      add: async (userId, category) => {
+        try {
+          const { data, error } = await supabase.from('categories').insert({ user_id: userId, ...category }).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      get: async (userId) => {
+        try {
+          const { data, error } = await supabase.from('categories').select('*').eq('user_id', userId).order('sort_order');
+          if (error) throw error;
+          return data;
+        } catch { return []; }
+      },
+      update: async (categoryId, updates) => {
+        try {
+          const { data, error } = await supabase.from('categories').update(updates).eq('id', categoryId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      delete: async (categoryId) => {
+        try {
+          const { error } = await supabase.from('categories').delete().eq('id', categoryId);
+          if (error) throw error;
+          return true;
+        } catch { return false; }
+      },
+      subscribe: (userId, callback) => {
+        return supabase.from(`categories:user_id=eq.${userId}`).on('*', callback).subscribe();
+      }
+    },
+    budgets: {
+      add: async (userId, budget) => {
+        try {
+          const { data, error } = await supabase.from('budgets').insert({ user_id: userId, ...budget }).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      get: async (userId) => {
+        try {
+          const { data, error } = await supabase.from('budgets').select('*, categories(*)').eq('user_id', userId).eq('is_active', true);
+          if (error) throw error;
+          return data;
+        } catch { return []; }
+      },
+      update: async (budgetId, updates) => {
+        try {
+          const { data, error } = await supabase.from('budgets').update(updates).eq('id', budgetId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      }
+    },
+    goals: {
+      add: async (userId, goal) => {
+        try {
+          const { data, error } = await supabase.from('goals').insert({ user_id: userId, ...goal }).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      get: async (userId) => {
+        try {
+          const { data, error } = await supabase.from('goals').select('*').eq('user_id', userId).eq('status', 'active');
+          if (error) throw error;
+          return data;
+        } catch { return []; }
+      },
+      update: async (goalId, updates) => {
+        try {
+          const { data, error } = await supabase.from('goals').update(updates).eq('id', goalId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      }
     }
-    return null;
-  },
-  summary(){
-    let assets=0,liabilities=0,income=0,expenses=0;
-    State.accounts.forEach(a=>{
-      const b=this.balance(a,State.entries);
-      if(a.type==='Asset')assets+=b;
-      else if(a.type==='Liability')liabilities+=b;
-      else if(a.type==='Income')income+=b;
-      else if(a.type==='Expense')expenses+=b;
-    });
-    return{assets,liabilities,income,expenses,net:assets-liabilities};
-  }
-};
+  };
 
-/* ============================================================
-   Format & Toast
-============================================================ */
-const Fmt={
-  currency:'PKR',
-  num(v){return new Intl.NumberFormat('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v||0);},
-  money(v){return`${this.currency} ${this.num(v)}`;},
-  date(d){if(!d)return'—';return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});},
-  today(){return new Date().toISOString().slice(0,10);},
-  monthStart(){const d=new Date();d.setDate(1);return d.toISOString().slice(0,10);},
-  ac(id){return'AC'+String(id).padStart(3,'0');},
-  vc(id){return'V'+String(id).padStart(3,'0');},
-};
-const Toast={
-  show(msg,type='info',dur=2800){
-    const c=document.getElementById('toast-container');
-    const t=document.createElement('div');t.className=`toast ${type}`;t.innerHTML=`<span>${msg}</span>`;c.appendChild(t);
-    setTimeout(()=>{t.style.transition='opacity .3s';t.style.opacity='0';setTimeout(()=>t.remove(),350);},dur);
-  }
-};
-
-/* ============================================================
-   Authentication
-============================================================ */
-const Auth={
-  async login(event){
-    event.preventDefault();
-    const email=document.getElementById('login-email').value.trim();
-    const password=document.getElementById('login-password').value.trim();
-    const errorEl=document.getElementById('login-error');
-    
-    // Basic validation
-    if(!email||!password){
-      errorEl.textContent='Email and password are required';
-      return;
+  // ==========================================================
+  // SupabaseDB (from supabase-db.js) – uses shared supabase client
+  // ==========================================================
+  const SupabaseDB = {
+    init: async () => { /* nothing to do */ },
+    accounts: {
+      get: async () => {
+        const userId = await getCurrentUserId();
+        if (!userId) return [];
+        try {
+          const { data, error } = await supabase.from('accounts').select('*').eq('user_id', userId).order('id');
+          if (error) throw error;
+          return data || [];
+        } catch { return []; }
+      },
+      add: async (account) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        try {
+          const { data, error } = await supabase.from('accounts').insert([{ user_id: userId, ...account }]).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      update: async (id, updates) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        try {
+          const { data, error } = await supabase.from('accounts').update(updates).eq('id', id).eq('user_id', userId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      delete: async (id) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return false;
+        try {
+          const { error } = await supabase.from('accounts').delete().eq('id', id).eq('user_id', userId);
+          if (error) throw error;
+          return true;
+        } catch { return false; }
+      }
+    },
+    vouchers: {
+      get: async () => {
+        const userId = await getCurrentUserId();
+        if (!userId) return [];
+        try {
+          const { data, error } = await supabase.from('vouchers').select('*').eq('user_id', userId).order('date', { ascending: false });
+          if (error) throw error;
+          return data || [];
+        } catch { return []; }
+      },
+      add: async (voucher) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        try {
+          const { data, error } = await supabase.from('vouchers').insert([{ user_id: userId, ...voucher }]).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      update: async (id, updates) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        try {
+          const { data, error } = await supabase.from('vouchers').update(updates).eq('id', id).eq('user_id', userId).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      delete: async (id) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return false;
+        try {
+          const { error } = await supabase.from('vouchers').delete().eq('id', id).eq('user_id', userId);
+          if (error) throw error;
+          return true;
+        } catch { return false; }
+      }
+    },
+    entries: {
+      get: async () => {
+        const userId = await getCurrentUserId();
+        if (!userId) return [];
+        try {
+          const { data, error } = await supabase.from('entries').select('*').eq('user_id', userId).order('id');
+          if (error) throw error;
+          return data || [];
+        } catch { return []; }
+      },
+      add: async (entry) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        try {
+          const { data, error } = await supabase.from('entries').insert([{ user_id: userId, ...entry }]).select().single();
+          if (error) throw error;
+          return data;
+        } catch { return null; }
+      },
+      delete: async (id) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return false;
+        try {
+          const { error } = await supabase.from('entries').delete().eq('id', id).eq('user_id', userId);
+          if (error) throw error;
+          return true;
+        } catch { return false; }
+      }
+    },
+    settings: {
+      get: async () => {
+        const userId = await getCurrentUserId();
+        if (!userId) return { currency: 'PKR', theme: 'dark' };
+        try {
+          const { data, error } = await supabase.from('settings').select('*').eq('user_id', userId).single();
+          if (error && error.code !== 'PGRST116') throw error;
+          return data || { currency: 'PKR', theme: 'dark' };
+        } catch { return { currency: 'PKR', theme: 'dark' }; }
+      },
+      update: async (settings) => {
+        const userId = await getCurrentUserId();
+        if (!userId) return null;
+        try {
+          const { data: existing } = await supabase.from('settings').select('id').eq('user_id', userId).single();
+          if (existing) {
+            const { data, error } = await supabase.from('settings').update(settings).eq('user_id', userId).select().single();
+            if (error) throw error;
+            return data;
+          } else {
+            const { data, error } = await supabase.from('settings').insert([{ user_id: userId, ...settings }]).select().single();
+            if (error) throw error;
+            return data;
+          }
+        } catch { return null; }
+      }
+    },
+    utils: {
+      clearAllData: async () => {
+        const userId = await getCurrentUserId();
+        if (!userId) return false;
+        try {
+          await supabase.from('entries').delete().eq('user_id', userId);
+          await supabase.from('vouchers').delete().eq('user_id', userId);
+          await supabase.from('accounts').delete().eq('user_id', userId);
+          return true;
+        } catch { return false; }
+      },
+      getCurrentUserId
     }
-    
-    // Store session (demo: accept any email/password combination)
-    const session={email,timestamp:Date.now(),authenticated:true};
-    localStorage.setItem('ledger_session',JSON.stringify(session));
-    
-    // Hide login screen, show app
-    document.getElementById('login-screen').style.display='none';
-    document.getElementById('app').style.display='flex';
-    
-    // Initialize app
-    await App.init();
-    
-    Toast.show(`Welcome, ${email.split('@')[0]}!`,'success',3000);
-  },
-  logout(){
-    localStorage.removeItem('ledger_session');
-    location.reload();
-  },
-  isAuthenticated(){
-    const session=localStorage.getItem('ledger_session');
-    if(!session)return false;
-    try{
-      const parsed=JSON.parse(session);
-      return parsed.authenticated===true;
-    }catch{
-      return false;
+  };
+
+  // Expose globally
+  window.SupabaseClient = SupabaseClient;
+  window.SupabaseDB = SupabaseDB;
+  window.DB = SupabaseDB; // for App
+
+  // ==========================================================
+  // State & Cache (from index.html)
+  // ==========================================================
+  const State={accounts:[],vouchers:[],entries:[],settings:{},dateFilter:{type:'month',from:null,to:null},searchQuery:'',currentPage:'dashboard',voucherDirty:false,savedLedgerAccId:null};
+  const Cache={
+    map:new Map(),
+    rebuild(){this.map.clear();State.accounts.forEach(a=>this.map.set(a.id,a));},
+    get(id){return this.map.get(id);},
+    search(q){
+      if(!q)return State.accounts.slice(0,8);
+      const lq=q.toLowerCase();
+      const starts=State.accounts.filter(a=>a.name.toLowerCase().startsWith(lq)||Fmt.ac(a.id).toLowerCase().startsWith(lq));
+      const has=State.accounts.filter(a=>!starts.includes(a)&&(a.name.toLowerCase().includes(lq)||Fmt.ac(a.id).toLowerCase().includes(lq)));
+      return[...starts,...has].slice(0,8);
     }
-  },
-  checkSession(){
-    if(!this.isAuthenticated()){
-      document.getElementById('app').style.display='none';
-      document.getElementById('login-screen').style.display='flex';
-    }else{
-      document.getElementById('login-screen').style.display='none';
-      document.getElementById('app').style.display='flex';
+  };
+
+  const Acct={
+    balance(acc,entries){
+      let dr=0,cr=0;entries.filter(e=>e.account_id===acc.id).forEach(e=>{dr+=e.debit||0;cr+=e.credit||0;});
+      const ob=acc.opening_balance||0;
+      return['Asset','Expense'].includes(acc.type)?(dr-cr+ob):(cr-dr+ob);
+    },
+    totalDr(e){return e.reduce((s,x)=>s+(x.debit||0),0);},
+    totalCr(e){return e.reduce((s,x)=>s+(x.credit||0),0);},
+    validate(rows){
+      const real=rows.filter(r=>!r._bal);
+      if(real.length<2)return'Voucher must have at least 2 entry rows.';
+      for(const r of real){
+        if(!r.account_id)return'All rows must have an account selected.';
+        if(r.debit>0&&r.credit>0)return'A row cannot have both Debit and Credit filled.';
+        if(!(r.debit>0)&&!(r.credit>0))return'Each row must have a Debit or Credit value.';
+      }
+      return null;
+    },
+    summary(){
+      let assets=0,liabilities=0,income=0,expenses=0;
+      State.accounts.forEach(a=>{
+        const b=this.balance(a,State.entries);
+        if(a.type==='Asset')assets+=b;
+        else if(a.type==='Liability')liabilities+=b;
+        else if(a.type==='Income')income+=b;
+        else if(a.type==='Expense')expenses+=b;
+      });
+      return{assets,liabilities,income,expenses,net:assets-liabilities};
     }
-  }
-};
+  };
 
-/* ============================================================
-   App
-============================================================ */
-const App={
-  async init(){
-    await DB.open();await this.loadAll();
-    Fmt.currency=State.settings.currency||'PKR';
-    document.documentElement.setAttribute('data-theme',State.settings.theme||'dark');
-    this.updateFooter();
-  },
-  async loadAll(){
-    State.accounts=await DB.all('accounts');State.vouchers=await DB.all('vouchers');State.entries=await DB.all('entries');
-    const raw=await DB.all('settings');State.settings={};raw.forEach(s=>State.settings[s.key]=s.value);
-    Cache.rebuild();
-  },
-  async saveSetting(k,v){await DB.put('settings',{key:k,value:v});State.settings[k]=v;},
-  updateFooter(){const n=State.vouchers.length;document.getElementById('sidebar-footer').textContent=`${n} voucher${n!==1?'s':''}`;},
+  const Fmt={
+    currency:'PKR',
+    num(v){return new Intl.NumberFormat('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v||0);},
+    money(v){return`${this.currency} ${this.num(v)}`;},
+    date(d){if(!d)return'—';return new Date(d).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'});},
+    today(){return new Date().toISOString().slice(0,10);},
+    monthStart(){const d=new Date();d.setDate(1);return d.toISOString().slice(0,10);},
+    ac(id){return'AC'+String(id).padStart(3,'0');},
+    vc(id){return'V'+String(id).padStart(3,'0');},
+  };
 
-  /* ── Sidebar toggle (mobile) ── */
-  toggleSidebar(){
-    const s=document.getElementById('sidebar');
-    const o=document.getElementById('sidebar-overlay');
-    const open=s.classList.toggle('open');
-    o.classList.toggle('show',open);
-  },
-  closeSidebar(){
-    document.getElementById('sidebar').classList.remove('open');
-    document.getElementById('sidebar-overlay').classList.remove('show');
-  },
+  const Toast={
+    show(msg,type='info',dur=2800){
+      const c=document.getElementById('toast-container');
+      const t=document.createElement('div');t.className=`toast ${type}`;t.innerHTML=`<span>${msg}</span>`;c.appendChild(t);
+      setTimeout(()=>{t.style.transition='opacity .3s';t.style.opacity='0';setTimeout(()=>t.remove(),350);},dur);
+    }
+  };
 
-  showMobileDateFilter(){
-    const current=State.dateFilter.type;
-    document.body.insertAdjacentHTML('beforeend',`
-    <div class="modal-overlay" id="date-filter-modal" onclick="if(event.target===this)this.remove()">
-      <div class="modal" style="max-width:400px">
-        <div class="modal-header">
-          <span class="modal-title">Date Filter</span>
-          <button class="close-btn" onclick="document.getElementById('date-filter-modal').remove()">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="form-group" style="margin-bottom:16px">
-            <label class="form-label">Period</label>
-            <div style="display:flex;flex-direction:column;gap:8px">
-              ${['all','today','month','custom'].map(opt=>`
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px;border-radius:6px;background:${current===opt?'var(--surface2)':'transparent'}">
-                  <input type="radio" name="date-period" value="${opt}" ${current===opt?'checked':''} onchange="document.getElementById('custom-dates').style.display=this.value==='custom'?'flex':'none'">
-                  <span>${opt==='all'?'All Time':opt==='today'?'Today':opt==='month'?'This Month':'Custom Range'}</span>
-                </label>
-              `).join('')}
+  // ==========================================================
+  // Auth (uses SupabaseClient)
+  // ==========================================================
+  const Auth={
+    isSignUpMode:false,
+    toggleMode(event){
+      event.preventDefault();
+      this.isSignUpMode=!this.isSignUpMode;
+      const btn=document.getElementById('login-btn');
+      const link=document.getElementById('login-toggle-link');
+      const text=document.getElementById('login-toggle-text');
+      const errorEl=document.getElementById('login-error');
+      errorEl.style.display='none';
+      errorEl.textContent='';
+      
+      if(this.isSignUpMode){
+        btn.textContent='Create Account';
+        text.textContent='Already have an account? ';
+        link.textContent='Sign In';
+      }else{
+        btn.textContent='Sign In';
+        text.textContent='Don\'t have an account? ';
+        link.textContent='Sign Up';
+      }
+    },
+    async handleSubmit(event){
+      event.preventDefault();
+      if(this.isSignUpMode){
+        await this.signUp();
+      }else{
+        await this.signIn();
+      }
+    },
+    async signUp(){
+      const email=document.getElementById('login-email').value.trim();
+      const password=document.getElementById('login-password').value.trim();
+      const errorEl=document.getElementById('login-error');
+      const btn=document.getElementById('login-btn');
+      
+      if(!email||!password){
+        errorEl.textContent='Email and password are required';
+        errorEl.style.display='block';
+        return;
+      }
+      if(password.length<6){
+        errorEl.textContent='Password must be at least 6 characters';
+        errorEl.style.display='block';
+        return;
+      }
+      
+      btn.disabled=true;
+      btn.textContent='Creating account...';
+      
+      try{
+        const result=await SupabaseClient.auth.signUp(email,password);
+        if(result.success){
+          Toast.show('Account created! Check your email to confirm.','success',4000);
+          errorEl.style.display='none';
+          setTimeout(()=>{this.isSignUpMode=false;this.toggleMode({preventDefault:()=>{}});btn.disabled=false;},2000);
+        }else{
+          errorEl.textContent=result.error||'Sign up failed';
+          errorEl.style.display='block';
+          btn.disabled=false;
+        }
+      }catch(error){
+        errorEl.textContent='Network error. Please try again.';
+        errorEl.style.display='block';
+        btn.disabled=false;
+      }
+      btn.textContent='Create Account';
+    },
+    async signIn(){
+      const email=document.getElementById('login-email').value.trim();
+      const password=document.getElementById('login-password').value.trim();
+      const errorEl=document.getElementById('login-error');
+      const btn=document.getElementById('login-btn');
+      
+      if(!email||!password){
+        errorEl.textContent='Email and password are required';
+        errorEl.style.display='block';
+        return;
+      }
+      
+      btn.disabled=true;
+      btn.textContent='Signing in...';
+      
+      try{
+        const result=await SupabaseClient.auth.signIn(email,password);
+        if(result.success){
+          const user=await SupabaseClient.auth.getCurrentUser();
+          if(user){
+            localStorage.setItem('ledger_user_id',user.id);
+            localStorage.setItem('ledger_user_email',user.email);
+          }
+          errorEl.style.display='none';
+          document.getElementById('login-screen').style.display='none';
+          document.getElementById('app').style.display='flex';
+          await App.init();
+          Toast.show(`Welcome, ${email.split('@')[0]}!`,'success',3000);
+        }else{
+          errorEl.textContent=result.error||'Sign in failed';
+          errorEl.style.display='block';
+          btn.disabled=false;
+        }
+      }catch(error){
+        errorEl.textContent='Network error. Please try again.';
+        errorEl.style.display='block';
+        btn.disabled=false;
+      }
+      btn.textContent='Sign In';
+    },
+    async logout(){
+      await SupabaseClient.auth.signOut();
+      localStorage.removeItem('ledger_user_id');
+      localStorage.removeItem('ledger_user_email');
+      location.reload();
+    },
+    async isAuthenticated(){
+      try{
+        const user=await SupabaseClient.auth.getCurrentUser();
+        return user!=null;
+      }catch{
+        return false;
+      }
+    },
+    async checkSession(){
+      const authenticated=await this.isAuthenticated();
+      if(!authenticated){
+        document.getElementById('app').style.display='none';
+        document.getElementById('login-screen').style.display='flex';
+      }else{
+        document.getElementById('login-screen').style.display='none';
+        document.getElementById('app').style.display='flex';
+      }
+    }
+  };
+
+  // ==========================================================
+  // App (uses DB, Auth, State, etc.)
+  // ==========================================================
+  const App={
+    async init(){
+      await DB.init();
+      await this.loadAll();
+      
+      const settings = await DB.settings.get();
+      Fmt.currency = settings.currency || 'PKR';
+      State.settings = settings;
+      document.documentElement.setAttribute('data-theme', settings.theme || 'dark');
+      
+      this.updateFooter();
+    },
+    async loadAll(){
+      State.accounts = await DB.accounts.get();
+      State.vouchers = await DB.vouchers.get();
+      State.entries = await DB.entries.get();
+      Cache.rebuild();
+    },
+    async saveSetting(k, v){
+      State.settings[k] = v;
+      await DB.settings.update(State.settings);
+    },
+    updateFooter(){const n=State.vouchers.length;document.getElementById('sidebar-footer').textContent=`${n} voucher${n!==1?'s':''}`;},
+
+    /* ── Sidebar toggle (mobile) ── */
+    toggleSidebar(){
+      const s=document.getElementById('sidebar');
+      const o=document.getElementById('sidebar-overlay');
+      const open=s.classList.toggle('open');
+      o.classList.toggle('show',open);
+    },
+    closeSidebar(){
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebar-overlay').classList.remove('show');
+    },
+
+    showMobileDateFilter(){
+      const current=State.dateFilter.type;
+      document.body.insertAdjacentHTML('beforeend',`
+      <div class="modal-overlay" id="date-filter-modal" onclick="if(event.target===this)this.remove()">
+        <div class="modal" style="max-width:400px">
+          <div class="modal-header">
+            <span class="modal-title">Date Filter</span>
+            <button class="close-btn" onclick="document.getElementById('date-filter-modal').remove()">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-group" style="margin-bottom:16px">
+              <label class="form-label">Period</label>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                ${['all','today','month','custom'].map(opt=>`
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:8px;border-radius:6px;background:${current===opt?'var(--surface2)':'transparent'}">
+                    <input type="radio" name="date-period" value="${opt}" ${current===opt?'checked':''} onchange="document.getElementById('custom-dates').style.display=this.value==='custom'?'flex':'none'">
+                    <span>${opt==='all'?'All Time':opt==='today'?'Today':opt==='month'?'This Month':'Custom Range'}</span>
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div id="custom-dates" style="display:${current==='custom'?'flex':'none'};flex-direction:column;gap:8px;margin-bottom:16px">
+              <div class="form-group">
+                <label class="form-label">From</label>
+                <input type="date" id="m-filter-from" class="form-input" value="${State.dateFilter.from||''}">
+              </div>
+              <div class="form-group">
+                <label class="form-label">To</label>
+                <input type="date" id="m-filter-to" class="form-input" value="${State.dateFilter.to||''}">
+              </div>
             </div>
           </div>
-          <div id="custom-dates" style="display:${current==='custom'?'flex':'none'};flex-direction:column;gap:8px;margin-bottom:16px">
-            <div class="form-group">
-              <label class="form-label">From</label>
-              <input type="date" id="m-filter-from" class="form-input" value="${State.dateFilter.from||''}">
-            </div>
-            <div class="form-group">
-              <label class="form-label">To</label>
-              <input type="date" id="m-filter-to" class="form-input" value="${State.dateFilter.to||''}">
-            </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="document.getElementById('date-filter-modal').remove()">Cancel</button>
+            <button class="btn btn-primary" onclick="App.applyMobileDateFilter()">Apply</button>
           </div>
         </div>
-        <div class="modal-footer">
-          <button class="btn btn-ghost" onclick="document.getElementById('date-filter-modal').remove()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.applyMobileDateFilter()">Apply</button>
+      </div>`);
+    },
+
+    applyMobileDateFilter(){
+      const period=document.querySelector('input[name="date-period"]:checked')?.value||'month';
+      State.dateFilter.type=period;
+      if(period==='custom'){
+        State.dateFilter.from=document.getElementById('m-filter-from')?.value||'';
+        State.dateFilter.to=document.getElementById('m-filter-to')?.value||'';
+      }
+      document.getElementById('date-filter-modal')?.remove();
+      this.navigate(State.currentPage);
+    },
+
+    closeVoucherModal(){
+      if(State.voucherDirty&&!confirm('You have unsaved changes. Close anyway?'))return;
+      document.getElementById('vchr-modal')?.remove();
+    },
+
+    /* ── Navigation ── */
+    navigate(page){
+      State.currentPage=page;
+      this.closeSidebar();
+      document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
+      document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
+      const fabAcc=document.getElementById('fab-account');
+      if(fabAcc)fabAcc.style.display=page==='accounts'&&window.innerWidth<=768?'flex':'none';
+      const c=document.getElementById('content');
+      if(page==='dashboard')c.innerHTML=this.renderDashboard();
+      else if(page==='accounts')c.innerHTML=this.renderAccounts();
+      else if(page==='vouchers')c.innerHTML=this.renderVouchers();
+      else if(page==='reports')c.innerHTML=this.renderReports();
+      else if(page==='settings')c.innerHTML=this.renderSettings();
+      c.scrollTop=0;
+    },
+
+    /* ── Date filter (topbar) ── */
+    setDateFilter(val){
+      State.dateFilter.type=val;
+      const s=val==='custom';
+      document.getElementById('filter-from').style.display=s?'':'none';
+      document.getElementById('filter-to').style.display=s?'':'none';
+      document.getElementById('from-label').style.display=s?'':'none';
+      document.getElementById('to-label').style.display=s?'':'none';
+      document.getElementById('apply-date-filter').style.display=s?'':'none';
+      if(s!==true)this.navigate(State.currentPage);
+    },
+    applyCustomRange(){
+      State.dateFilter.from=document.getElementById('filter-from').value;
+      State.dateFilter.to=document.getElementById('filter-to').value;
+      this.navigate(State.currentPage);
+    },
+    filteredVouchers(f){
+      const filter=f||State.dateFilter;
+      const today=Fmt.today(),ms=Fmt.monthStart();
+      return State.vouchers.filter(v=>{
+        if(filter.type==='today')return v.date===today;
+        if(filter.type==='month')return v.date>=ms&&v.date<=today;
+        if(filter.type==='custom'){if(filter.from&&v.date<filter.from)return false;if(filter.to&&v.date>filter.to)return false;return true;}
+        return true;
+      });
+    },
+    globalSearch:(()=>{let t;return function(q){clearTimeout(t);t=setTimeout(()=>{State.searchQuery=q.trim().toLowerCase();App.navigate(State.currentPage);},220);};})(),
+
+    hl(text,q){
+      if(!q||!text)return text||'';
+      const plain=(text+'').replace(/<[^>]+>/g,'');
+      const idx=plain.toLowerCase().indexOf(q);if(idx===-1)return plain;
+      return plain.slice(0,idx)+`<mark>${plain.slice(idx,idx+q.length)}</mark>`+plain.slice(idx+q.length);
+    },
+
+    /* ============================================================
+       Dashboard
+    ============================================================ */
+    renderDashboard(){
+      const s=Acct.summary();
+      let recent=[...this.filteredVouchers()].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,10);
+      const q=State.searchQuery;
+      if(q)recent=recent.filter(v=>(v.narration||'').toLowerCase().includes(q)||Fmt.vc(v.id).toLowerCase().includes(q));
+      return`
+      <div class="page-header">
+        <div class="page-header-left">
+          <div class="page-title">Dashboard</div>
+          <div class="page-subtitle">${Fmt.date(Fmt.today())}</div>
         </div>
       </div>
-    </div>`);
-  },
-
-  applyMobileDateFilter(){
-    const period=document.querySelector('input[name="date-period"]:checked')?.value||'month';
-    State.dateFilter.type=period;
-    if(period==='custom'){
-      State.dateFilter.from=document.getElementById('m-filter-from')?.value||'';
-      State.dateFilter.to=document.getElementById('m-filter-to')?.value||'';
-    }
-    document.getElementById('date-filter-modal')?.remove();
-    this.navigate(State.currentPage);
-  },
-
-  closeVoucherModal(){
-    if(State.voucherDirty&&!confirm('You have unsaved changes. Close anyway?'))return;
-    document.getElementById('vchr-modal')?.remove();
-  },
-
-  /* ── Navigation ── */
-  navigate(page){
-    State.currentPage=page;
-    this.closeSidebar();
-    // sidebar nav items
-    document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
-    // bottom nav items
-    document.querySelectorAll('.bn-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
-    // show account FAB only on accounts page on mobile
-    const fabAcc=document.getElementById('fab-account');
-    if(fabAcc)fabAcc.style.display=page==='accounts'&&window.innerWidth<=768?'flex':'none';
-    const c=document.getElementById('content');
-    if(page==='dashboard')c.innerHTML=this.renderDashboard();
-    else if(page==='accounts')c.innerHTML=this.renderAccounts();
-    else if(page==='vouchers')c.innerHTML=this.renderVouchers();
-    else if(page==='reports')c.innerHTML=this.renderReports();
-    else if(page==='settings')c.innerHTML=this.renderSettings();
-    c.scrollTop=0;
-  },
-
-  /* ── Date filter (topbar) ── */
-  setDateFilter(val){
-    State.dateFilter.type=val;
-    const s=val==='custom';
-    document.getElementById('filter-from').style.display=s?'':'none';
-    document.getElementById('filter-to').style.display=s?'':'none';
-    document.getElementById('from-label').style.display=s?'':'none';
-    document.getElementById('to-label').style.display=s?'':'none';
-    document.getElementById('apply-date-filter').style.display=s?'':'none';
-    if(s!==true)this.navigate(State.currentPage);
-  },
-  applyCustomRange(){
-    State.dateFilter.from=document.getElementById('filter-from').value;
-    State.dateFilter.to=document.getElementById('filter-to').value;
-    this.navigate(State.currentPage);
-  },
-  filteredVouchers(f){
-    const filter=f||State.dateFilter;
-    const today=Fmt.today(),ms=Fmt.monthStart();
-    return State.vouchers.filter(v=>{
-      if(filter.type==='today')return v.date===today;
-      if(filter.type==='month')return v.date>=ms&&v.date<=today;
-      if(filter.type==='custom'){if(filter.from&&v.date<filter.from)return false;if(filter.to&&v.date>filter.to)return false;return true;}
-      return true;
-    });
-  },
-  globalSearch:(()=>{let t;return function(q){clearTimeout(t);t=setTimeout(()=>{State.searchQuery=q.trim().toLowerCase();App.navigate(State.currentPage);},220);};})(),
-
-  hl(text,q){
-    if(!q||!text)return text||'';
-    const plain=(text+'').replace(/<[^>]+>/g,'');
-    const idx=plain.toLowerCase().indexOf(q);if(idx===-1)return plain;
-    return plain.slice(0,idx)+`<mark>${plain.slice(idx,idx+q.length)}</mark>`+plain.slice(idx+q.length);
-  },
-
-  /* ============================================================
-     Dashboard
-  ============================================================ */
-  renderDashboard(){
-    const s=Acct.summary();
-    let recent=[...this.filteredVouchers()].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,10);
-    const q=State.searchQuery;
-    if(q)recent=recent.filter(v=>(v.narration||'').toLowerCase().includes(q)||Fmt.vc(v.id).toLowerCase().includes(q));
-    return`
-    <div class="page-header">
-      <div class="page-header-left">
-        <div class="page-title">Dashboard</div>
-        <div class="page-subtitle">${Fmt.date(Fmt.today())}</div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-label">Assets</div><div class="stat-value blue">${Fmt.money(s.assets)}</div></div>
+        <div class="stat-card"><div class="stat-label">Liabilities</div><div class="stat-value red">${Fmt.money(s.liabilities)}</div></div>
+        <div class="stat-card"><div class="stat-label">Net Balance</div><div class="stat-value ${s.net>=0?'green':'red'}">${Fmt.money(s.net)}</div></div>
+        <div class="stat-card"><div class="stat-label">Income</div><div class="stat-value green">${Fmt.money(s.income)}</div></div>
+        <div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value yellow">${Fmt.money(s.expenses)}</div></div>
       </div>
-    </div>
-    <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label">Assets</div><div class="stat-value blue">${Fmt.money(s.assets)}</div></div>
-      <div class="stat-card"><div class="stat-label">Liabilities</div><div class="stat-value red">${Fmt.money(s.liabilities)}</div></div>
-      <div class="stat-card"><div class="stat-label">Net Balance</div><div class="stat-value ${s.net>=0?'green':'red'}">${Fmt.money(s.net)}</div></div>
-      <div class="stat-card"><div class="stat-label">Income</div><div class="stat-value green">${Fmt.money(s.income)}</div></div>
-      <div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value yellow">${Fmt.money(s.expenses)}</div></div>
-    </div>
-    <div class="card">
-      <div class="card-pad" style="border-bottom:1px solid var(--border);font-weight:600">Recent Vouchers</div>
-      ${recent.length===0?'<div class="empty"><div class="empty-icon">◷</div><div class="empty-text">No vouchers yet. Tap + to create one.</div></div>':`
-      <div class="table-wrap"><table>
-        <thead><tr><th>V#</th><th>Date</th><th>Narration</th><th class="text-right">Dr</th><th class="text-right">Cr</th><th></th></tr></thead>
-        <tbody>${recent.map(v=>{const e=State.entries.filter(x=>x.voucher_id===v.id);return`<tr>
-          <td class="mono" style="color:var(--accent)">${Fmt.vc(v.id)}</td>
-          <td class="mono" style="white-space:nowrap">${Fmt.date(v.date)}</td>
-          <td>${v.narration||'<span class="text-muted">—</span>'}</td>
-          <td class="mono text-right text-green">${Fmt.num(Acct.totalDr(e))}</td>
-          <td class="mono text-right text-red">${Fmt.num(Acct.totalCr(e))}</td>
-          <td><button class="btn btn-ghost btn-sm btn-icon" onclick="App.openVoucherModal(${v.id})">✎</button></td>
-        </tr>`;}).join('')}</tbody>
-      </table></div>`}
-    </div>`;
-  },
-
-  /* ============================================================
-     Accounts
-  ============================================================ */
-  renderAccounts(){
-    let accs=State.accounts;
-    const q=State.searchQuery;
-    if(q)accs=accs.filter(a=>a.name.toLowerCase().includes(q)||Fmt.ac(a.id).toLowerCase().includes(q));
-    const tf=window._acTypeFilter||'all';
-    if(tf!=='all')accs=accs.filter(a=>a.type===tf);
-    return`
-    <div class="page-header">
-      <div class="page-header-left">
-        <div class="page-title">Accounts</div>
-        <div class="page-subtitle">${State.accounts.length} total</div>
-      </div>
-      <button class="btn btn-primary btn-sm" onclick="App.openAccountModal()">+ New Account</button>
-    </div>
-    <div class="filter-bar">
-      ${['all','Asset','Liability','Income','Expense'].map(t=>`<span class="filter-chip ${tf===t?'active':''}" onclick="window._acTypeFilter='${t}';App.navigate('accounts')">${t==='all'?'All':t}</span>`).join('')}
-    </div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>AC #</th><th>Name</th><th>Type</th><th class="text-right">Opening</th><th class="text-right">Balance</th><th></th></tr></thead>
-      <tbody>${accs.length===0?`<tr><td colspan="6"><div class="empty"><div class="empty-text">No accounts found.</div></div></td></tr>`:
-        accs.map(a=>{const b=Acct.balance(a,State.entries);const ob=a.opening_balance||0;return`<tr>
-          <td class="mono" style="color:var(--accent)">${Fmt.ac(a.id)}</td>
-          <td><strong>${this.hl(a.name,q)}</strong></td>
-          <td><span class="badge badge-${a.type.toLowerCase()}">${a.type}</span></td>
-          <td class="mono text-right text-muted">${ob?Fmt.num(ob):'—'}</td>
-          <td class="mono text-right ${b>=0?'text-green':'text-red'}">${Fmt.money(b)}</td>
-          <td style="text-align:right;white-space:nowrap">
-            <button class="btn btn-ghost btn-sm btn-icon" onclick="App.openAccountModal(${a.id})" title="Edit">✎</button>
-            <button class="btn btn-ghost btn-sm btn-icon" onclick="App.deleteAccount(${a.id})" title="Delete" style="color:var(--red)">✕</button>
-          </td>
-        </tr>`;}).join('')}
-      </tbody>
-    </table></div></div>`;
-  },
-
-  openAccountModal(id=null){
-    const acc=id?Cache.get(id):null;
-    document.body.insertAdjacentHTML('beforeend',`
-    <div class="modal-overlay" id="acc-modal" onclick="if(event.target===this)this.remove()">
-      <div class="modal">
-        <div class="modal-header">
-          <span class="modal-title">${acc?`Edit — ${Fmt.ac(acc.id)}`:'New Account'}</span>
-          <button class="close-btn" onclick="document.getElementById('acc-modal').remove()">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="form-row"><div class="form-group">
-            <label class="form-label">Account Name</label>
-            <input id="acc-name" class="form-input" value="${acc?acc.name:''}" placeholder="e.g. Cash, Bank, Sales Revenue">
-          </div></div>
-          <div class="form-row form-row-2">
-            <div class="form-group">
-              <label class="form-label">Type</label>
-              <select id="acc-type" class="form-select">${['Asset','Liability','Income','Expense'].map(t=>`<option value="${t}" ${acc&&acc.type===t?'selected':''}>${t}</option>`).join('')}</select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Opening Balance <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
-              <input type="number" id="acc-ob" class="form-input" value="${acc&&acc.opening_balance?acc.opening_balance:''}" placeholder="0.00" min="0" step="0.01">
-              <span class="form-hint">Leave blank for zero</span>
-            </div>
-          </div>
-          <div class="form-row"><div class="form-group">
-            <label class="form-label">Description</label>
-            <textarea id="acc-desc" class="form-textarea" placeholder="Notes about this account">${acc?(acc.description||''):''}</textarea>
-          </div></div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-ghost" onclick="document.getElementById('acc-modal').remove()">Cancel</button>
-          <button class="btn btn-primary" onclick="App.saveAccount(${id||'null'})">Save Account</button>
-        </div>
-      </div>
-    </div>`);
-    setTimeout(()=>document.getElementById('acc-name')?.focus(),100);
-  },
-
-  async saveAccount(id){
-    const name=document.getElementById('acc-name').value.trim();
-    const type=document.getElementById('acc-type').value;
-    const description=document.getElementById('acc-desc').value.trim();
-    const ob=parseFloat(document.getElementById('acc-ob').value)||0;
-    if(!name){Toast.show('Account name is required.','error');return;}
-    if(State.accounts.some(a=>a.name.trim().toLowerCase()===name.toLowerCase()&&a.id!==id)){Toast.show('Account name already exists.','error');return;}
-    await DB.put('accounts',id?{id,name,type,description,opening_balance:ob}:{name,type,description,opening_balance:ob});
-    await this.loadAll();document.getElementById('acc-modal').remove();
-    Toast.show(`Account "${name}" saved.`,'success');this.navigate('accounts');
-  },
-
-  async deleteAccount(id){
-    const linked=State.entries.filter(e=>e.account_id===id);
-    if(linked.length>0&&!confirm('This account has existing entries. Delete anyway?'))return;
-    for(const e of linked)await DB.del('entries',e.id);
-    await DB.del('accounts',id);await this.loadAll();Toast.show('Account deleted.','info');this.navigate('accounts');
-  },
-
-  /* ============================================================
-     Vouchers
-  ============================================================ */
-  renderVouchers(){
-    let vouchers=this.filteredVouchers().sort((a,b)=>b.date.localeCompare(a.date));
-    const q=State.searchQuery;
-    if(q)vouchers=vouchers.filter(v=>(v.narration||'').toLowerCase().includes(q)||Fmt.vc(v.id).toLowerCase().includes(q));
-    return`
-    <div class="page-header">
-      <div class="page-header-left">
-        <div class="page-title">Vouchers</div>
-        <div class="page-subtitle">${vouchers.length} vouchers</div>
-      </div>
-      <button class="btn btn-primary btn-sm" onclick="App.openVoucherModal()">+ New</button>
-    </div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>V#</th><th>Date</th><th>Narration</th><th class="text-right">Dr</th><th class="text-right">Cr</th><th></th></tr></thead>
-      <tbody>${vouchers.length===0?`<tr><td colspan="6"><div class="empty"><div class="empty-icon">◷</div><div class="empty-text">No vouchers found.</div></div></td></tr>`:
-        vouchers.map(v=>{
-          const ents=State.entries.filter(e=>e.voucher_id===v.id);
-          return`<tr>
+      <div class="card">
+        <div class="card-pad" style="border-bottom:1px solid var(--border);font-weight:600">Recent Vouchers</div>
+        ${recent.length===0?'<div class="empty"><div class="empty-icon">◷</div><div class="empty-text">No vouchers yet. Tap + to create one.</div></div>':`
+        <div class="table-wrap"><table>
+          <thead><tr><th>V#</th><th>Date</th><th>Narration</th><th class="text-right">Dr</th><th class="text-right">Cr</th><th></th></tr></thead>
+          <tbody>${recent.map(v=>{const e=State.entries.filter(x=>x.voucher_id===v.id);return`<tr>
             <td class="mono" style="color:var(--accent)">${Fmt.vc(v.id)}</td>
             <td class="mono" style="white-space:nowrap">${Fmt.date(v.date)}</td>
-            <td>${this.hl(v.narration||'<span class="text-muted">—</span>',q)}</td>
-            <td class="mono text-right text-green">${Fmt.num(Acct.totalDr(ents))}</td>
-            <td class="mono text-right text-red">${Fmt.num(Acct.totalCr(ents))}</td>
+            <td>${v.narration||'<span class="text-muted">—</span>'}</td>
+            <td class="mono text-right text-green">${Fmt.num(Acct.totalDr(e))}</td>
+            <td class="mono text-right text-red">${Fmt.num(Acct.totalCr(e))}</td>
+            <td><button class="btn btn-ghost btn-sm btn-icon" onclick="App.openVoucherModal(${v.id})">✎</button></td>
+          </tr>`;}).join('')}</tbody>
+        </table></div>`}
+      </div>`;
+    },
+
+    /* ============================================================
+       Accounts
+    ============================================================ */
+    renderAccounts(){
+      let accs=State.accounts;
+      const q=State.searchQuery;
+      if(q)accs=accs.filter(a=>a.name.toLowerCase().includes(q)||Fmt.ac(a.id).toLowerCase().includes(q));
+      const tf=window._acTypeFilter||'all';
+      if(tf!=='all')accs=accs.filter(a=>a.type===tf);
+      return`
+      <div class="page-header">
+        <div class="page-header-left">
+          <div class="page-title">Accounts</div>
+          <div class="page-subtitle">${State.accounts.length} total</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="App.openAccountModal()">+ New Account</button>
+      </div>
+      <div class="filter-bar">
+        ${['all','Asset','Liability','Income','Expense'].map(t=>`<span class="filter-chip ${tf===t?'active':''}" onclick="window._acTypeFilter='${t}';App.navigate('accounts')">${t==='all'?'All':t}</span>`).join('')}
+      </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>AC #</th><th>Name</th><th>Type</th><th class="text-right">Opening</th><th class="text-right">Balance</th><th></th></tr></thead>
+        <tbody>${accs.length===0?`<tr><td colspan="6"><div class="empty"><div class="empty-text">No accounts found.</div></div></td></tr>`:
+          accs.map(a=>{const b=Acct.balance(a,State.entries);const ob=a.opening_balance||0;return`<tr>
+            <td class="mono" style="color:var(--accent)">${Fmt.ac(a.id)}</td>
+            <td><strong>${this.hl(a.name,q)}</strong></td>
+            <td><span class="badge badge-${a.type.toLowerCase()}">${a.type}</span></td>
+            <td class="mono text-right text-muted">${ob?Fmt.num(ob):'—'}</td>
+            <td class="mono text-right ${b>=0?'text-green':'text-red'}">${Fmt.money(b)}</td>
             <td style="text-align:right;white-space:nowrap">
-              <button class="btn btn-ghost btn-sm btn-icon" onclick="App.openVoucherModal(${v.id})" title="Edit">✎</button>
-              <button class="btn btn-ghost btn-sm btn-icon" onclick="App.duplicateVoucher(${v.id})" title="Duplicate">⧉</button>
-              <button class="btn btn-ghost btn-sm btn-icon" onclick="App.deleteVoucher(${v.id})" title="Delete" style="color:var(--red)">✕</button>
+              <button class="btn btn-ghost btn-sm btn-icon" onclick="App.openAccountModal(${a.id})" title="Edit">✎</button>
+              <button class="btn btn-ghost btn-sm btn-icon" onclick="App.deleteAccount(${a.id})" title="Delete" style="color:var(--red)">✕</button>
             </td>
-          </tr>`;
-        }).join('')}
-      </tbody>
-    </table></div></div>`;
-  },
+          </tr>`;}).join('')}
+        </tbody>
+      </table></div></div>`;
+    },
 
-  /* ── Voucher Modal ── */
-  _rows:[],_editId:null,
-
-  openVoucherModal(id=null){
-    this._editId=id;State.voucherDirty=false;
-    let v=null,existing=[];
-    if(id){v=State.vouchers.find(x=>x.id===id);existing=State.entries.filter(e=>e.voucher_id===id);}
-    this._rows=existing.length>0
-      ?existing.map(e=>({account_id:e.account_id,debit:e.debit||0,credit:e.credit||0}))
-      :[{account_id:null,debit:0,credit:0},{account_id:null,debit:0,credit:0}];
-
-    const vcode=id?`<span style="font-size:12px;color:var(--accent);font-family:var(--font-mono);margin-left:8px">${Fmt.vc(id)}</span>`:'';
-    document.body.insertAdjacentHTML('beforeend',`
-    <div class="modal-overlay" id="vchr-modal">
-      <div class="modal" style="max-width:760px">
-        <div class="modal-header">
-          <span class="modal-title">${id?'Edit Voucher':'New Voucher'}${vcode}</span>
-          <button class="close-btn" onclick="App.closeVoucherModal()">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="form-row form-row-2">
-            <div class="form-group">
-              <label class="form-label">Date</label>
-              <input type="date" id="v-date" class="form-input" value="${v?v.date:Fmt.today()}" oninput="State.voucherDirty=true">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Narration</label>
-              <input type="text" id="v-narration" class="form-input" value="${v?(v.narration||''):''}" placeholder="Description of transaction" oninput="State.voucherDirty=true">
-            </div>
+    openAccountModal(id=null){
+      const acc=id?Cache.get(id):null;
+      document.body.insertAdjacentHTML('beforeend',`
+      <div class="modal-overlay" id="acc-modal" onclick="if(event.target===this)this.remove()">
+        <div class="modal">
+          <div class="modal-header">
+            <span class="modal-title">${acc?`Edit — ${Fmt.ac(acc.id)}`:'New Account'}</span>
+            <button class="close-btn" onclick="document.getElementById('acc-modal').remove()">✕</button>
           </div>
-          <div class="divider"></div>
-          <div id="entry-table-wrap"></div>
-          <div class="totals-row" id="totals-row"></div>
-          <div id="voucher-error" class="form-error mt-8"></div>
+          <div class="modal-body">
+            <div class="form-row"><div class="form-group">
+              <label class="form-label">Account Name</label>
+              <input id="acc-name" class="form-input" value="${acc?acc.name:''}" placeholder="e.g. Cash, Bank, Sales Revenue">
+            </div></div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label class="form-label">Type</label>
+                <select id="acc-type" class="form-select">${['Asset','Liability','Income','Expense'].map(t=>`<option value="${t}" ${acc&&acc.type===t?'selected':''}>${t}</option>`).join('')}</select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Opening Balance <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+                <input type="number" id="acc-ob" class="form-input" value="${acc&&acc.opening_balance?acc.opening_balance:''}" placeholder="0.00" min="0" step="0.01">
+                <span class="form-hint">Leave blank for zero</span>
+              </div>
+            </div>
+            <div class="form-row"><div class="form-group">
+              <label class="form-label">Description</label>
+              <textarea id="acc-desc" class="form-textarea" placeholder="Notes about this account">${acc?(acc.description||''):''}</textarea>
+            </div></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="document.getElementById('acc-modal').remove()">Cancel</button>
+            <button class="btn btn-primary" onclick="App.saveAccount(${id||'null'})">Save Account</button>
+          </div>
         </div>
-        <div class="modal-footer">
-          <button class="btn btn-ghost" onclick="App.closeVoucherModal()">Cancel</button>
-          <button class="btn btn-ghost btn-sm" onclick="App.addEntryRow()">+ Row</button>
-          <button class="btn btn-primary" onclick="App.saveVoucher()">Save Voucher</button>
+      </div>`);
+      setTimeout(()=>document.getElementById('acc-name')?.focus(),100);
+    },
+
+    async saveAccount(id){
+      const name=document.getElementById('acc-name').value.trim();
+      const type=document.getElementById('acc-type').value;
+      const description=document.getElementById('acc-desc').value.trim();
+      const ob=parseFloat(document.getElementById('acc-ob').value)||0;
+      
+      if(!name){Toast.show('Account name is required.','error');return;}
+      if(State.accounts.some(a=>a.name.trim().toLowerCase()===name.toLowerCase()&&a.id!==id)){Toast.show('Account name already exists.','error');return;}
+      
+      if(id){
+        await DB.accounts.update(id, {name, type, description, opening_balance: ob});
+        Toast.show(`Account "${name}" updated.`,'success');
+      }else{
+        await DB.accounts.add({name, type, description, opening_balance: ob});
+        Toast.show(`Account "${name}" created.`,'success');
+      }
+      
+      await this.loadAll();
+      document.getElementById('acc-modal').remove();
+      this.navigate('accounts');
+    },
+
+    async deleteAccount(id){
+      const linked=State.entries.filter(e=>e.account_id===id);
+      if(linked.length>0&&!confirm('This account has existing entries. Delete anyway?'))return;
+      
+      for(const e of linked)await DB.entries.delete(e.id);
+      await DB.accounts.delete(id);
+      await this.loadAll();
+      Toast.show('Account deleted.','info');
+      this.navigate('accounts');
+    },
+
+    /* ============================================================
+       Vouchers
+    ============================================================ */
+    renderVouchers(){
+      let vouchers=this.filteredVouchers().sort((a,b)=>b.date.localeCompare(a.date));
+      const q=State.searchQuery;
+      if(q)vouchers=vouchers.filter(v=>(v.narration||'').toLowerCase().includes(q)||Fmt.vc(v.id).toLowerCase().includes(q));
+      return`
+      <div class="page-header">
+        <div class="page-header-left">
+          <div class="page-title">Vouchers</div>
+          <div class="page-subtitle">${vouchers.length} vouchers</div>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="App.openVoucherModal()">+ New</button>
+      </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>V#</th><th>Date</th><th>Narration</th><th class="text-right">Dr</th><th class="text-right">Cr</th><th></th></tr></thead>
+        <tbody>${vouchers.length===0?`<tr><td colspan="6"><div class="empty"><div class="empty-icon">◷</div><div class="empty-text">No vouchers found.</div></div></td></tr>`:
+          vouchers.map(v=>{
+            const ents=State.entries.filter(e=>e.voucher_id===v.id);
+            return`<tr>
+              <td class="mono" style="color:var(--accent)">${Fmt.vc(v.id)}</td>
+              <td class="mono" style="white-space:nowrap">${Fmt.date(v.date)}</td>
+              <td>${this.hl(v.narration||'<span class="text-muted">—</span>',q)}</td>
+              <td class="mono text-right text-green">${Fmt.num(Acct.totalDr(ents))}</td>
+              <td class="mono text-right text-red">${Fmt.num(Acct.totalCr(ents))}</td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn btn-ghost btn-sm btn-icon" onclick="App.openVoucherModal(${v.id})" title="Edit">✎</button>
+                <button class="btn btn-ghost btn-sm btn-icon" onclick="App.duplicateVoucher(${v.id})" title="Duplicate">⧉</button>
+                <button class="btn btn-ghost btn-sm btn-icon" onclick="App.deleteVoucher(${v.id})" title="Delete" style="color:var(--red)">✕</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table></div></div>`;
+    },
+
+    /* ── Voucher Modal ── */
+    _rows:[],_editId:null,
+
+    openVoucherModal(id=null){
+      this._editId=id;State.voucherDirty=false;
+      let v=null,existing=[];
+      if(id){v=State.vouchers.find(x=>x.id===id);existing=State.entries.filter(e=>e.voucher_id===id);}
+      this._rows=existing.length>0
+        ?existing.map(e=>({account_id:e.account_id,debit:e.debit||0,credit:e.credit||0}))
+        :[{account_id:null,debit:0,credit:0},{account_id:null,debit:0,credit:0}];
+
+      const vcode=id?`<span style="font-size:12px;color:var(--accent);font-family:var(--font-mono);margin-left:8px">${Fmt.vc(id)}</span>`:'';
+      document.body.insertAdjacentHTML('beforeend',`
+      <div class="modal-overlay" id="vchr-modal">
+        <div class="modal" style="max-width:760px">
+          <div class="modal-header">
+            <span class="modal-title">${id?'Edit Voucher':'New Voucher'}${vcode}</span>
+            <button class="close-btn" onclick="App.closeVoucherModal()">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label class="form-label">Date</label>
+                <input type="date" id="v-date" class="form-input" value="${v?v.date:Fmt.today()}" oninput="State.voucherDirty=true">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Narration</label>
+                <input type="text" id="v-narration" class="form-input" value="${v?(v.narration||''):''}" placeholder="Description of transaction" oninput="State.voucherDirty=true">
+              </div>
+            </div>
+            <div class="divider"></div>
+            <div id="entry-table-wrap"></div>
+            <div class="totals-row" id="totals-row"></div>
+            <div id="voucher-error" class="form-error mt-8"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="App.closeVoucherModal()">Cancel</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.addEntryRow()">+ Row</button>
+            <button class="btn btn-primary" onclick="App.saveVoucher()">Save Voucher</button>
+          </div>
+        </div>
+      </div>`);
+      this.renderEntryTable();
+    },
+
+    renderEntryTable(){
+      const w=document.getElementById('entry-table-wrap');if(!w)return;
+      w.innerHTML=`<table class="voucher-table">
+        <thead><tr><th style="width:44%">Account</th><th>Debit</th><th>Credit</th><th style="width:28px"></th></tr></thead>
+        <tbody id="entry-tbody">${this._rows.map((r,i)=>this.renderRow(r,i)).join('')}</tbody>
+      </table>`;
+      this.updateTotals();
+    },
+
+    renderRow(row,i){
+      const name=row.account_id?(Cache.get(row.account_id)?.name||''):'';
+      const bal=row._bal;
+      return`<tr data-idx="${i}" ${bal?'class="balancing-row"':''}>
+        <td><div class="ac-wrap" id="ac-wrap-${i}">
+          <input type="text" class="entry-input" id="ac-${i}" value="${name}" placeholder="Account…"
+            oninput="App.onAcInput(${i},this.value)" onkeydown="App.onAcKey(event,${i})"
+            onfocus="App.onAcInput(${i},this.value)" onblur="setTimeout(()=>App.hideAC(${i}),180)" autocomplete="off">
+          <div class="ac-dropdown" id="ac-drop-${i}" style="display:none"></div>
+        </div></td>
+        <td><input type="number" class="entry-input mono ${bal?'locked':''}" id="dr-${i}" value="${row.debit||''}"
+          placeholder="0.00" min="0" step="0.01" inputmode="decimal" ${bal&&row.debit?'readonly':''}
+          oninput="App.onAmtChange(${i},'debit',this.value)" onkeydown="App.onAmtKey(event,${i},'debit')"></td>
+        <td><input type="number" class="entry-input mono ${bal?'locked':''}" id="cr-${i}" value="${row.credit||''}"
+          placeholder="0.00" min="0" step="0.01" inputmode="decimal" ${bal&&row.credit?'readonly':''}
+          oninput="App.onAmtChange(${i},'credit',this.value)" onkeydown="App.onAmtKey(event,${i},'credit')"></td>
+        <td>${!bal?`<button class="row-del-btn" onclick="App.delRow(${i})">✕</button>`:'<span style="font-size:10px;color:var(--yellow)" title="Auto-balance">⚖</span>'}</td>
+      </tr>`;
+    },
+
+    onAcInput(i,val){
+      const m=Cache.search(val),drop=document.getElementById(`ac-drop-${i}`);if(!drop)return;
+      const q=val.toLowerCase();
+      drop.innerHTML=m.map(a=>`
+        <div class="ac-item" onmousedown="App.selectAc(${i},${a.id},'${a.name.replace(/'/g,"\\'")}')">
+          <span>${this.hlAC(a.name,q)}</span>
+          <span class="ac-meta"><span class="ac-code">${Fmt.ac(a.id)}</span><span class="ac-type">${a.type}</span></span>
+        </div>`).join('')+
+        (val&&!State.accounts.find(a=>a.name.toLowerCase()===q)?`<div class="ac-item ac-create" onmousedown="App.quickCreate('${val.replace(/'/g,"\\'")}',${i})">+ Create "${val}"</div>`:'');
+      drop.style.display=(m.length>0||val)?'block':'none';this._acF=[i,-1];
+    },
+    hlAC(n,q){if(!q)return n;const i=n.toLowerCase().indexOf(q);if(i===-1)return n;return n.slice(0,i)+`<span class="ac-match">${n.slice(i,i+q.length)}</span>`+n.slice(i+q.length);},
+    _acF:[-1,-1],
+    onAcKey(e,i){
+      const drop=document.getElementById(`ac-drop-${i}`);const items=drop?drop.querySelectorAll('.ac-item'):[];
+      let[,mi]=this._acF;
+      if(e.key==='ArrowDown'){e.preventDefault();mi=Math.min(mi+1,items.length-1);this._acF=[i,mi];items.forEach((el,idx)=>el.classList.toggle('selected',idx===mi));}
+      else if(e.key==='ArrowUp'){e.preventDefault();mi=Math.max(mi-1,0);this._acF=[i,mi];items.forEach((el,idx)=>el.classList.toggle('selected',idx===mi));}
+      else if(e.key==='Enter'&&mi>=0&&items[mi]){e.preventDefault();items[mi].dispatchEvent(new MouseEvent('mousedown'));}
+      else if(e.key==='Tab'){if(mi>=0&&items[mi]){e.preventDefault();items[mi].dispatchEvent(new MouseEvent('mousedown'));}this.hideAC(i);}
+      else if(e.key==='Escape')this.hideAC(i);
+    },
+    hideAC(i){const d=document.getElementById(`ac-drop-${i}`);if(d)d.style.display='none';},
+    selectAc(i,aid,name){
+      this._rows[i].account_id=aid;State.voucherDirty=true;
+      const inp=document.getElementById(`ac-${i}`);if(inp)inp.value=name;
+      this.hideAC(i);const dr=document.getElementById(`dr-${i}`);if(dr)dr.focus();
+    },
+    async quickCreate(name,i){
+      const type=prompt(`Create "${name}"\nType: Asset, Liability, Income, Expense`,'Asset');
+      if(!type||!['Asset','Liability','Income','Expense'].includes(type))return;
+      const id=await DB.put('accounts',{name,type,description:'',opening_balance:0});
+      await this.loadAll();this.selectAc(i,id,name);Toast.show(`"${name}" created.`,'success');
+    },
+    onAmtChange(i,field,val){
+      State.voucherDirty=true;
+      const v=parseFloat(val)||0;this._rows[i][field]=v;
+      if(v>0){const o=field==='debit'?'credit':'debit';this._rows[i][o]=0;const el=document.getElementById(`${o==='debit'?'dr':'cr'}-${i}`);if(el)el.value='';}
+      this.updateTotals();
+    },
+    onAmtKey(e,i,field){
+      if((e.key==='Tab'||e.key==='Enter')&&field==='credit'&&i===this._rows.length-1&&!e.shiftKey){
+        e.preventDefault();this.addEntryRow();setTimeout(()=>document.getElementById(`ac-${i+1}`)?.focus(),50);
+      }
+    },
+    addEntryRow(){
+      this._rows.push({account_id:null,debit:0,credit:0});this.renderEntryTable();
+      setTimeout(()=>document.getElementById(`ac-${this._rows.length-1}`)?.focus(),30);
+    },
+    delRow(i){
+      if(this._rows.filter(r=>!r._bal).length<=2){Toast.show('Minimum 2 rows required.','error');return;}
+      this._rows.splice(i,1);this.renderEntryTable();
+    },
+
+    updateTotals(){
+      const real=this._rows.filter(r=>!r._bal);
+      const dr=real.reduce((s,r)=>s+(r.debit||0),0),cr=real.reduce((s,r)=>s+(r.credit||0),0);
+      this._rows=this._rows.filter(r=>!r._bal);
+      if(Math.abs(dr-cr)>=0.001&&dr>0.001&&cr>0.001){
+        const balDiff=dr>cr?parseFloat((dr-cr).toFixed(2)):parseFloat((cr-dr).toFixed(2));
+        const suggested=State.accounts.find(a=>(a.type==='Asset'||a.type==='Liability')&&a.id!==real[0]?.account_id);
+        const sugId=suggested?.id||null;
+        if(dr>cr)this._rows.push({account_id:sugId,credit:balDiff,debit:0,_bal:true});
+        else this._rows.push({account_id:sugId,debit:balDiff,credit:0,_bal:true});
+      }
+      const tbody=document.getElementById('entry-tbody');
+      if(tbody)tbody.innerHTML=this._rows.map((r,i)=>this.renderRow(r,i)).join('');
+      const te=document.getElementById('totals-row');
+      if(te){
+        const allDr=this._rows.reduce((s,r)=>s+(r.debit||0),0);
+        const allCr=this._rows.reduce((s,r)=>s+(r.credit||0),0);
+        te.innerHTML=`
+          <div class="total-cell"><div class="total-label">Total Debit</div><div class="total-amount text-green">${Fmt.num(allDr)}</div></div>
+          <div class="total-cell"><div class="total-label">Total Credit</div><div class="total-amount text-red">${Fmt.num(allCr)}</div></div>`;
+      }
+    },
+
+    async saveVoucher(){
+      const date=document.getElementById('v-date').value;
+      const narration=document.getElementById('v-narration').value.trim();
+      const errEl=document.getElementById('voucher-error');
+      
+      if(!date){errEl.textContent='Date is required.';return;}
+      const err=Acct.validate(this._rows);if(err){errEl.textContent=err;return;}
+      
+      const allRows=this._rows;
+      const dr=allRows.reduce((s,r)=>s+(r.debit||0),0),cr=allRows.reduce((s,r)=>s+(r.credit||0),0);
+      if(Math.abs(dr-cr)>0.001){errEl.textContent='Voucher not balanced. Select an account for the ⚖ row.';return;}
+      
+      const balRow=allRows.find(r=>r._bal);
+      if(balRow&&!balRow.account_id){errEl.textContent='Please select an account for the auto-balancing row (⚖).';return;}
+      
+      let finalId;
+      if(this._editId){
+        await DB.vouchers.update(this._editId, {date, narration, total_debit: dr, total_credit: cr, is_balanced: true});
+        finalId = this._editId;
+      }else{
+        const v = await DB.vouchers.add({date, narration, total_debit: dr, total_credit: cr, is_balanced: true});
+        finalId = v.id;
+      }
+      
+      const old = State.entries.filter(e => e.voucher_id === finalId);
+      for(const e of old) await DB.entries.delete(e.id);
+      
+      for(const r of allRows){
+        if(!r.account_id) continue;
+        await DB.entries.add({voucher_id: finalId, account_id: r.account_id, debit: r.debit||0, credit: r.credit||0});
+      }
+      
+      await this.loadAll();
+      document.getElementById('vchr-modal').remove();
+      Toast.show('Voucher saved.','success');
+      this.navigate(State.currentPage);
+      this.updateFooter();
+    },
+
+    async deleteVoucher(id){
+      if(!confirm('Delete this voucher and all its entries?'))return;
+      
+      const entries = State.entries.filter(e => e.voucher_id === id);
+      for(const e of entries) await DB.entries.delete(e.id);
+      await DB.vouchers.delete(id);
+      
+      await this.loadAll();
+      Toast.show('Voucher deleted.','info');
+      this.navigate('vouchers');
+      this.updateFooter();
+    },
+    
+    async duplicateVoucher(id){
+      const v=State.vouchers.find(x=>x.id===id);
+      const entries=State.entries.filter(x=>x.voucher_id===id);
+      
+      const newV = await DB.vouchers.add({date: Fmt.today(), narration: (v.narration||'') + ' (copy)', total_debit: v.total_debit, total_credit: v.total_credit, is_balanced: v.is_balanced});
+      
+      for(const e of entries) {
+        await DB.entries.add({voucher_id: newV.id, account_id: e.account_id, debit: e.debit, credit: e.credit});
+      }
+      
+      await this.loadAll();
+      Toast.show('Voucher duplicated.','success');
+      this.navigate('vouchers');
+      this.updateFooter();
+    },
+
+    /* ============================================================
+       Reports
+    ============================================================ */
+    _rptFilter:{from:'',to:''},
+    _rptGenerated:false,
+
+    renderReports(){
+      const tab=window._reportTab||'trial';
+      if(!this._rptFilter.from){this._rptFilter.from=Fmt.monthStart();this._rptFilter.to=Fmt.today();}
+      const f=this._rptFilter;
+      const isLedger=tab==='ledger';
+      const selAccId=window._ledgerAccId||(State.accounts[0]?.id||null);
+      return`
+      <div class="page-header">
+        <div class="page-header-left">
+          <div class="page-title">Reports</div>
+          <div class="page-subtitle">Set range · click Generate</div>
         </div>
       </div>
-    </div>`);
-    this.renderEntryTable();
-  },
-
-  renderEntryTable(){
-    const w=document.getElementById('entry-table-wrap');if(!w)return;
-    w.innerHTML=`<table class="voucher-table">
-      <thead><tr><th style="width:44%">Account</th><th>Debit</th><th>Credit</th><th style="width:28px"></th></tr></thead>
-      <tbody id="entry-tbody">${this._rows.map((r,i)=>this.renderRow(r,i)).join('')}</tbody>
-    </table>`;
-    this.updateTotals();
-  },
-
-  renderRow(row,i){
-    const name=row.account_id?(Cache.get(row.account_id)?.name||''):'';
-    const bal=row._bal;
-    return`<tr data-idx="${i}" ${bal?'class="balancing-row"':''}>
-      <td><div class="ac-wrap" id="ac-wrap-${i}">
-        <input type="text" class="entry-input" id="ac-${i}" value="${name}" placeholder="Account…"
-          oninput="App.onAcInput(${i},this.value)" onkeydown="App.onAcKey(event,${i})"
-          onfocus="App.onAcInput(${i},this.value)" onblur="setTimeout(()=>App.hideAC(${i}),180)" autocomplete="off">
-        <div class="ac-dropdown" id="ac-drop-${i}" style="display:none"></div>
-      </div></td>
-      <td><input type="number" class="entry-input mono ${bal?'locked':''}" id="dr-${i}" value="${row.debit||''}"
-        placeholder="0.00" min="0" step="0.01" inputmode="decimal" ${bal&&row.debit?'readonly':''}
-        oninput="App.onAmtChange(${i},'debit',this.value)" onkeydown="App.onAmtKey(event,${i},'debit')"></td>
-      <td><input type="number" class="entry-input mono ${bal?'locked':''}" id="cr-${i}" value="${row.credit||''}"
-        placeholder="0.00" min="0" step="0.01" inputmode="decimal" ${bal&&row.credit?'readonly':''}
-        oninput="App.onAmtChange(${i},'credit',this.value)" onkeydown="App.onAmtKey(event,${i},'credit')"></td>
-      <td>${!bal?`<button class="row-del-btn" onclick="App.delRow(${i})">✕</button>`:'<span style="font-size:10px;color:var(--yellow)" title="Auto-balance">⚖</span>'}</td>
-    </tr>`;
-  },
-
-  onAcInput(i,val){
-    const m=Cache.search(val),drop=document.getElementById(`ac-drop-${i}`);if(!drop)return;
-    const q=val.toLowerCase();
-    drop.innerHTML=m.map(a=>`
-      <div class="ac-item" onmousedown="App.selectAc(${i},${a.id},'${a.name.replace(/'/g,"\\'")}')">
-        <span>${this.hlAC(a.name,q)}</span>
-        <span class="ac-meta"><span class="ac-code">${Fmt.ac(a.id)}</span><span class="ac-type">${a.type}</span></span>
-      </div>`).join('')+
-      (val&&!State.accounts.find(a=>a.name.toLowerCase()===q)?`<div class="ac-item ac-create" onmousedown="App.quickCreate('${val.replace(/'/g,"\\'")}',${i})">+ Create "${val}"</div>`:'');
-    drop.style.display=(m.length>0||val)?'block':'none';this._acF=[i,-1];
-  },
-  hlAC(n,q){if(!q)return n;const i=n.toLowerCase().indexOf(q);if(i===-1)return n;return n.slice(0,i)+`<span class="ac-match">${n.slice(i,i+q.length)}</span>`+n.slice(i+q.length);},
-  _acF:[-1,-1],
-  onAcKey(e,i){
-    const drop=document.getElementById(`ac-drop-${i}`);const items=drop?drop.querySelectorAll('.ac-item'):[];
-    let[,mi]=this._acF;
-    if(e.key==='ArrowDown'){e.preventDefault();mi=Math.min(mi+1,items.length-1);this._acF=[i,mi];items.forEach((el,idx)=>el.classList.toggle('selected',idx===mi));}
-    else if(e.key==='ArrowUp'){e.preventDefault();mi=Math.max(mi-1,0);this._acF=[i,mi];items.forEach((el,idx)=>el.classList.toggle('selected',idx===mi));}
-    else if(e.key==='Enter'&&mi>=0&&items[mi]){e.preventDefault();items[mi].dispatchEvent(new MouseEvent('mousedown'));}
-    else if(e.key==='Tab'){if(mi>=0&&items[mi]){e.preventDefault();items[mi].dispatchEvent(new MouseEvent('mousedown'));}this.hideAC(i);}
-    else if(e.key==='Escape')this.hideAC(i);
-  },
-  hideAC(i){const d=document.getElementById(`ac-drop-${i}`);if(d)d.style.display='none';},
-  selectAc(i,aid,name){
-    this._rows[i].account_id=aid;State.voucherDirty=true;
-    const inp=document.getElementById(`ac-${i}`);if(inp)inp.value=name;
-    this.hideAC(i);const dr=document.getElementById(`dr-${i}`);if(dr)dr.focus();
-  },
-  async quickCreate(name,i){
-    const type=prompt(`Create "${name}"\nType: Asset, Liability, Income, Expense`,'Asset');
-    if(!type||!['Asset','Liability','Income','Expense'].includes(type))return;
-    const id=await DB.put('accounts',{name,type,description:'',opening_balance:0});
-    await this.loadAll();this.selectAc(i,id,name);Toast.show(`"${name}" created.`,'success');
-  },
-  onAmtChange(i,field,val){
-    State.voucherDirty=true;
-    const v=parseFloat(val)||0;this._rows[i][field]=v;
-    if(v>0){const o=field==='debit'?'credit':'debit';this._rows[i][o]=0;const el=document.getElementById(`${o==='debit'?'dr':'cr'}-${i}`);if(el)el.value='';}
-    this.updateTotals();
-  },
-  onAmtKey(e,i,field){
-    if((e.key==='Tab'||e.key==='Enter')&&field==='credit'&&i===this._rows.length-1&&!e.shiftKey){
-      e.preventDefault();this.addEntryRow();setTimeout(()=>document.getElementById(`ac-${i+1}`)?.focus(),50);
-    }
-  },
-  addEntryRow(){
-    this._rows.push({account_id:null,debit:0,credit:0});this.renderEntryTable();
-    setTimeout(()=>document.getElementById(`ac-${this._rows.length-1}`)?.focus(),30);
-  },
-  delRow(i){
-    if(this._rows.filter(r=>!r._bal).length<=2){Toast.show('Minimum 2 rows required.','error');return;}
-    this._rows.splice(i,1);this.renderEntryTable();
-  },
-
-  updateTotals(){
-    const real=this._rows.filter(r=>!r._bal);
-    const dr=real.reduce((s,r)=>s+(r.debit||0),0),cr=real.reduce((s,r)=>s+(r.credit||0),0);
-    this._rows=this._rows.filter(r=>!r._bal);
-    if(Math.abs(dr-cr)>=0.001&&dr>0.001&&cr>0.001){
-      const balDiff=dr>cr?parseFloat((dr-cr).toFixed(2)):parseFloat((cr-dr).toFixed(2));
-      const suggested=State.accounts.find(a=>(a.type==='Asset'||a.type==='Liability')&&a.id!==real[0]?.account_id);
-      const sugId=suggested?.id||null;
-      if(dr>cr)this._rows.push({account_id:sugId,credit:balDiff,debit:0,_bal:true});
-      else this._rows.push({account_id:sugId,debit:balDiff,credit:0,_bal:true});
-    }
-    const tbody=document.getElementById('entry-tbody');
-    if(tbody)tbody.innerHTML=this._rows.map((r,i)=>this.renderRow(r,i)).join('');
-    const te=document.getElementById('totals-row');
-    if(te){
-      const allDr=this._rows.reduce((s,r)=>s+(r.debit||0),0);
-      const allCr=this._rows.reduce((s,r)=>s+(r.credit||0),0);
-      te.innerHTML=`
-        <div class="total-cell"><div class="total-label">Total Debit</div><div class="total-amount text-green">${Fmt.num(allDr)}</div></div>
-        <div class="total-cell"><div class="total-label">Total Credit</div><div class="total-amount text-red">${Fmt.num(allCr)}</div></div>`;
-    }
-  },
-
-  async saveVoucher(){
-    const date=document.getElementById('v-date').value;
-    const narration=document.getElementById('v-narration').value.trim();
-    const errEl=document.getElementById('voucher-error');
-    if(!date){errEl.textContent='Date is required.';return;}
-    const err=Acct.validate(this._rows);if(err){errEl.textContent=err;return;}
-    const allRows=this._rows;
-    const dr=allRows.reduce((s,r)=>s+(r.debit||0),0),cr=allRows.reduce((s,r)=>s+(r.credit||0),0);
-    if(Math.abs(dr-cr)>0.001){errEl.textContent='Voucher not balanced. Select an account for the ⚖ row.';return;}
-    const balRow=allRows.find(r=>r._bal);
-    if(balRow&&!balRow.account_id){errEl.textContent='Please select an account for the auto-balancing row (⚖).';return;}
-    const obj=this._editId?{id:this._editId,date,narration}:{date,narration};
-    const vid=await DB.put('vouchers',obj);const finalId=this._editId||vid;
-    const old=await DB.byIdx('entries','voucher_id',finalId);for(const e of old)await DB.del('entries',e.id);
-    for(const r of allRows){if(!r.account_id)continue;await DB.put('entries',{voucher_id:finalId,account_id:r.account_id,debit:r.debit||0,credit:r.credit||0});}
-    await this.loadAll();document.getElementById('vchr-modal').remove();
-    Toast.show('Voucher saved.','success');this.navigate(State.currentPage);this.updateFooter();
-  },
-
-  async deleteVoucher(id){
-    if(!confirm('Delete this voucher and all its entries?'))return;
-    const e=await DB.byIdx('entries','voucher_id',id);for(const x of e)await DB.del('entries',x.id);
-    await DB.del('vouchers',id);await this.loadAll();Toast.show('Voucher deleted.','info');this.navigate('vouchers');this.updateFooter();
-  },
-  async duplicateVoucher(id){
-    const v=State.vouchers.find(x=>x.id===id);const e=State.entries.filter(x=>x.voucher_id===id);
-    const nid=await DB.put('vouchers',{date:Fmt.today(),narration:(v.narration||'')+'(copy)'});
-    for(const x of e)await DB.put('entries',{voucher_id:nid,account_id:x.account_id,debit:x.debit,credit:x.credit});
-    await this.loadAll();Toast.show('Voucher duplicated.','success');this.navigate('vouchers');this.updateFooter();
-  },
-
-  /* ============================================================
-     Reports
-  ============================================================ */
-  _rptFilter:{from:'',to:''},
-  _rptGenerated:false,
-
-  renderReports(){
-    const tab=window._reportTab||'trial';
-    if(!this._rptFilter.from){this._rptFilter.from=Fmt.monthStart();this._rptFilter.to=Fmt.today();}
-    const f=this._rptFilter;
-    const isLedger=tab==='ledger';
-    const selAccId=window._ledgerAccId||(State.accounts[0]?.id||null);
-    return`
-    <div class="page-header">
-      <div class="page-header-left">
-        <div class="page-title">Reports</div>
-        <div class="page-subtitle">Set range · click Generate</div>
+      <div class="tabs">
+        <div class="tab ${tab==='trial'?'active':''}" onclick="window._reportTab='trial';App._rptGenerated=false;App.navigate('reports')">Trial Balance</div>
+        <div class="tab ${tab==='ledger'?'active':''}" onclick="window._reportTab='ledger';App._rptGenerated=false;App.navigate('reports')">Ledger</div>
+        <div class="tab ${tab==='income'?'active':''}" onclick="window._reportTab='income';App._rptGenerated=false;App.navigate('reports')">Income Statement</div>
+        <div class="tab ${tab==='balance'?'active':''}" onclick="window._reportTab='balance';App._rptGenerated=false;App.navigate('reports')">Balance Sheet</div>
       </div>
-    </div>
-    <div class="tabs">
-      <div class="tab ${tab==='trial'?'active':''}" onclick="window._reportTab='trial';App._rptGenerated=false;App.navigate('reports')">Trial Balance</div>
-      <div class="tab ${tab==='ledger'?'active':''}" onclick="window._reportTab='ledger';App._rptGenerated=false;App.navigate('reports')">Ledger</div>
-      <div class="tab ${tab==='income'?'active':''}" onclick="window._reportTab='income';App._rptGenerated=false;App.navigate('reports')">Income Statement</div>
-      <div class="tab ${tab==='balance'?'active':''}" onclick="window._reportTab='balance';App._rptGenerated=false;App.navigate('reports')">Balance Sheet</div>
-    </div>
-    <div class="report-controls">
-      <div class="form-group"><label class="form-label">From</label><input type="date" id="rpt-from" class="form-input" value="${f.from}"></div>
-      <div class="form-group"><label class="form-label">To</label><input type="date" id="rpt-to" class="form-input" value="${f.to}"></div>
-      ${isLedger&&State.accounts.length>0?`
-      <div class="form-group" style="flex:1;min-width:180px">
-        <label class="form-label">Account</label>
-        <select id="rpt-acc" class="form-select" onchange="State.savedLedgerAccId=this.value">
-          ${State.accounts.map(a=>`<option value="${a.id}" ${a.id===(State.savedLedgerAccId||selAccId)?'selected':''}>${Fmt.ac(a.id)} — ${a.name}</option>`).join('')}
-        </select>
-      </div>`:''}
-      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="App.generateReport()">Generate</button>
-        <button class="btn btn-ghost" onclick="App.resetReport()">Reset</button>
-      </div>
-    </div>
-    <div id="rpt-out">${this._rptGenerated?this._renderRptBody(tab):`
-      <div class="card card-pad" style="text-align:center;padding:40px 16px">
-        <div style="font-size:26px;margin-bottom:10px;color:var(--text3)">≡</div>
-        <div style="color:var(--text3);font-size:13px">Select a date range and tap <strong style="color:var(--text)">Generate</strong></div>
-      </div>`}
-    </div>`;
-  },
-
-  generateReport(){
-    const from=document.getElementById('rpt-from')?.value||'';
-    const to=document.getElementById('rpt-to')?.value||'';
-    if(from&&to&&from>to){Toast.show('From date cannot be after To date.','error');return;}
-    this._rptFilter={from,to};
-    if(window._reportTab==='ledger'){const s=document.getElementById('rpt-acc');if(s){State.savedLedgerAccId=parseInt(s.value);window._ledgerAccId=parseInt(s.value);}}
-    this._rptGenerated=true;
-    const out=document.getElementById('rpt-out');
-    if(out)out.innerHTML=this._renderRptBody(window._reportTab||'trial');
-    Toast.show('Report generated.','success');
-  },
-  resetReport(){this._rptFilter={from:Fmt.monthStart(),to:Fmt.today()};this._rptGenerated=false;this.navigate('reports');},
-  _renderRptBody(tab){return tab==='trial'?this.rptTrial():tab==='ledger'?this.rptLedger():tab==='income'?this.rptIncome():this.rptBalance();},
-  rptVouchers(){const{from,to}=this._rptFilter;return State.vouchers.filter(v=>{if(from&&v.date<from)return false;if(to&&v.date>to)return false;return true;});},
-  rptEntries(){const ids=new Set(this.rptVouchers().map(v=>v.id));return State.entries.filter(e=>ids.has(e.voucher_id));},
-  periodLabel(){const{from,to}=this._rptFilter;return`<strong style="color:var(--text)">${from?Fmt.date(from):'All'}</strong> — <strong style="color:var(--text)">${to?Fmt.date(to):'All'}</strong>`;},
-
-  rptTrial(){
-    const entries=this.rptEntries();let tdr=0,tcr=0;
-    const rows=State.accounts.map(a=>{
-      const trans={dr:entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0),cr:entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0)};
-      const ob=a.opening_balance||0;
-      const isNormal=['Asset','Expense'].includes(a.type);
-      const bal=isNormal?(trans.dr-trans.cr+ob):(trans.cr-trans.dr+ob);
-      const finalDr=isNormal?Math.max(bal,0):trans.dr;
-      const finalCr=isNormal?trans.cr:(bal>=0?bal:0)+(trans.cr);
-      tdr+=finalDr;tcr+=finalCr;return{a,dr:finalDr,cr:finalCr,ob};
-    }).filter(r=>r.dr>0||r.cr>0||r.ob>0);
-    const balanced=Math.abs(tdr-tcr)<0.001;
-    return`
-    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">Period: ${this.periodLabel()}</div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>AC #</th><th>Account</th><th>Type</th><th class="text-right">Debit</th><th class="text-right">Credit</th></tr></thead>
-      <tbody>
-        ${rows.length===0?`<tr><td colspan="5"><div class="empty"><div class="empty-text">No accounts or transactions in this period.</div></div></td></tr>`:
-          rows.map(r=>`<tr>
-            <td class="mono" style="color:var(--accent)">${Fmt.ac(r.a.id)}</td>
-            <td>${r.a.name}</td>
-            <td><span class="badge badge-${r.a.type.toLowerCase()}">${r.a.type}</span></td>
-            <td class="mono text-right text-green">${r.dr>0?Fmt.num(r.dr):'—'}</td>
-            <td class="mono text-right text-red">${r.cr>0?Fmt.num(r.cr):'—'}</td>
-          </tr>`).join('')}
-        <tr style="border-top:2px solid var(--border2)">
-          <td colspan="3"><strong>TOTAL</strong></td>
-          <td class="mono text-right text-green fw-600">${Fmt.num(tdr)}</td>
-          <td class="mono text-right text-red fw-600">${Fmt.num(tcr)}</td>
-        </tr>
-        <tr><td colspan="5" class="text-center ${balanced?'text-green':'text-red'} mono fw-600" style="padding:12px">
-          ${balanced?'Trial Balance BALANCED':'IMBALANCE: '+Fmt.num(Math.abs(tdr-tcr))}
-        </td></tr>
-      </tbody>
-    </table></div></div>`;
-  },
-
-  rptLedger(){
-    const selId=State.savedLedgerAccId||window._ledgerAccId||(State.accounts[0]?.id||null);
-    const acc=selId?Cache.get(selId):null;
-    if(!acc)return'<div class="empty"><div class="empty-text">No accounts available.</div></div>';
-    const entries=this.rptEntries().filter(e=>e.account_id===selId);
-    const vMap=new Map(State.vouchers.map(v=>[v.id,v]));
-    const isNormal=['Asset','Expense'].includes(acc.type);
-    let running=acc.opening_balance||0;
-    const rows=entries.map(e=>({e,v:vMap.get(e.voucher_id)})).filter(x=>x.v)
-      .sort((a,b)=>a.v.date.localeCompare(b.v.date))
-      .map(({e,v})=>{const dr=e.debit||0,cr=e.credit||0;running+=isNormal?(dr-cr):(cr-dr);return{e,dr,cr,running,v};});
-    return`
-    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">
-      <strong style="color:var(--text)">${Fmt.ac(acc.id)} — ${acc.name}</strong>
-      &nbsp;<span class="badge badge-${acc.type.toLowerCase()}">${acc.type}</span>
-      &nbsp;Period: ${this.periodLabel()}
-      ${(acc.opening_balance||0)!==0?`&nbsp;· Opening: <strong style="color:var(--accent)">${Fmt.num(acc.opening_balance)}</strong>`:''}
-    </div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>V#</th><th>Date</th><th>Narration</th><th class="text-right">Dr</th><th class="text-right">Cr</th><th class="text-right">Balance</th></tr></thead>
-      <tbody>
-        ${(acc.opening_balance||0)!==0?`<tr style="background:var(--surface2)">
-          <td class="mono text-muted">—</td><td class="mono text-muted">Opn</td><td class="text-muted">Opening Balance</td>
-          <td class="mono text-right">—</td><td class="mono text-right">—</td>
-          <td class="mono text-right fw-600" style="color:var(--accent)">${Fmt.num(acc.opening_balance)}</td>
-        </tr>`:''}
-        ${rows.length===0?`<tr><td colspan="6"><div class="empty"><div class="empty-text">No transactions for this account in this period.</div></div></td></tr>`:
-          rows.map(r=>`<tr>
-            <td class="mono" style="color:var(--accent)">${Fmt.vc(r.v.id)}</td>
-            <td class="mono" style="white-space:nowrap">${Fmt.date(r.v.date)}</td>
-            <td>${r.v.narration||'—'}</td>
-            <td class="mono text-right text-green">${r.dr>0?Fmt.num(r.dr):'—'}</td>
-            <td class="mono text-right text-red">${r.cr>0?Fmt.num(r.cr):'—'}</td>
-            <td class="mono text-right fw-600 ${r.running>=0?'text-green':'text-red'}">${Fmt.num(Math.abs(r.running))} ${r.running>=0?'Dr':'Cr'}</td>
-          </tr>`).join('')}
-      </tbody>
-    </table></div></div>`;
-  },
-
-  rptIncome(){
-    const entries=this.rptEntries();
-    const iAccs=State.accounts.filter(a=>a.type==='Income');
-    const eAccs=State.accounts.filter(a=>a.type==='Expense');
-    const cal=a=>{
-      const dr=entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
-      const cr=entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
-      return a.type==='Income'?cr-dr:dr-cr;
-    };
-    const ti=iAccs.reduce((s,a)=>s+cal(a),0),te=eAccs.reduce((s,a)=>s+cal(a),0),net=ti-te;
-    return`
-    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">Period: ${this.periodLabel()}</div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>AC #</th><th>Account</th><th class="text-right">Amount</th></tr></thead>
-      <tbody>
-        <tr><td colspan="3" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--green)">INCOME</strong></td></tr>
-        ${iAccs.length===0?'<tr><td colspan="3" class="text-muted text-center" style="padding:8px">No income accounts</td></tr>':
-          iAccs.map(a=>`<tr><td class="mono" style="color:var(--accent);padding-left:20px">${Fmt.ac(a.id)}</td><td style="padding-left:20px">${a.name}</td><td class="mono text-right text-green">${Fmt.num(cal(a))}</td></tr>`).join('')}
-        <tr style="border-top:1px solid var(--border2)"><td></td><td><strong>Total Income</strong></td><td class="mono text-right text-green fw-600">${Fmt.num(ti)}</td></tr>
-        <tr><td colspan="3" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--yellow)">EXPENSES</strong></td></tr>
-        ${eAccs.length===0?'<tr><td colspan="3" class="text-muted text-center" style="padding:8px">No expense accounts</td></tr>':
-          eAccs.map(a=>`<tr><td class="mono" style="color:var(--accent);padding-left:20px">${Fmt.ac(a.id)}</td><td style="padding-left:20px">${a.name}</td><td class="mono text-right text-yellow">${Fmt.num(cal(a))}</td></tr>`).join('')}
-        <tr style="border-top:1px solid var(--border2)"><td></td><td><strong>Total Expenses</strong></td><td class="mono text-right fw-600 text-yellow">${Fmt.num(te)}</td></tr>
-        <tr style="border-top:2px solid var(--border2)"><td></td><td><strong>Net ${net>=0?'Profit':'Loss'}</strong></td><td class="mono text-right fw-600 ${net>=0?'text-green':'text-red'}">${Fmt.money(Math.abs(net))}</td></tr>
-      </tbody>
-    </table></div></div>`;
-  },
-
-  rptBalance(){
-    const periodEntries=this.rptEntries();
-    const assets=State.accounts.filter(a=>a.type==='Asset').map(a=>{
-      const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
-      const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
-      const ob=a.opening_balance||0;
-      const bal=dr-cr+ob;
-      return{a,bal};
-    }).filter(r=>r.bal!==0);
-    const liabilities=State.accounts.filter(a=>a.type==='Liability').map(a=>{
-      const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
-      const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
-      const ob=a.opening_balance||0;
-      const bal=cr-dr+ob;
-      return{a,bal};
-    }).filter(r=>r.bal!==0);
-    const iAccs=State.accounts.filter(a=>a.type==='Income');
-    const eAccs=State.accounts.filter(a=>a.type==='Expense');
-    const iBalance=iAccs.reduce((s,a)=>{
-      const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
-      const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
-      return s+(cr-dr);
-    },0);
-    const eBalance=eAccs.reduce((s,a)=>{
-      const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
-      const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
-      return s+(dr-cr);
-    },0);
-    const totalAssets=assets.reduce((s,r)=>s+r.bal,0);
-    const totalLiab=liabilities.reduce((s,r)=>s+r.bal,0);
-    const totalEq=iBalance-eBalance;
-    return`
-    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">As at ${this._rptFilter.to?Fmt.date(this._rptFilter.to):Fmt.today()}</div>
-    <div class="card"><div class="table-wrap"><table>
-      <thead><tr><th>ASSETS</th><th class="text-right">Amount</th></tr></thead>
-      <tbody>
-        ${assets.length===0?'<tr><td colspan="2" class="text-muted text-center" style="padding:8px">No asset accounts</td></tr>':assets.map(r=>`<tr><td style="padding-left:16px">${Fmt.ac(r.a.id)} — ${r.a.name}</td><td class="mono text-right text-green">${Fmt.money(r.bal)}</td></tr>`).join('')}
-        <tr style="border-top:1px solid var(--border2)"><td style="padding-left:16px"><strong>Total Assets</strong></td><td class="mono text-right text-green fw-600">${Fmt.money(totalAssets)}</td></tr>
-      </tbody>
-    </table></div></div>
-    <div class="card" style="margin-top:16px"><div class="table-wrap"><table>
-      <thead><tr><th>LIABILITIES & EQUITY</th><th class="text-right">Amount</th></tr></thead>
-      <tbody>
-        <tr><td colspan="2" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--red)">LIABILITIES</strong></td></tr>
-        ${liabilities.length===0?'<tr><td colspan="2" class="text-muted text-center" style="padding:8px">No liability accounts</td></tr>':liabilities.map(r=>`<tr><td style="padding-left:20px">${Fmt.ac(r.a.id)} — ${r.a.name}</td><td class="mono text-right text-red">${Fmt.money(r.bal)}</td></tr>`).join('')}
-        <tr style="border-top:1px solid var(--border2)"><td style="padding-left:20px"><strong>Total Liabilities</strong></td><td class="mono text-right text-red fw-600">${Fmt.money(totalLiab)}</td></tr>
-        <tr><td colspan="2" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--green)">EQUITY</strong></td></tr>
-        <tr><td style="padding-left:20px">Net Profit/Loss</td><td class="mono text-right ${totalEq>=0?'text-green':'text-red'} fw-600">${Fmt.money(totalEq)}</td></tr>
-        <tr style="border-top:2px solid var(--border2)"><td><strong>Total Liabilities & Equity</strong></td><td class="mono text-right fw-600 ${Math.abs(totalAssets-(totalLiab+totalEq))<0.01?'text-green':'text-red'}">${Fmt.money(totalLiab+totalEq)}</td></tr>
-      </tbody>
-    </table></div></div>
-    ${Math.abs(totalAssets-(totalLiab+totalEq))<0.01?'':'<div style="color:var(--red);padding:12px;margin-top:12px"><strong>⚠ Balance Sheet does not balance</strong></div>'}`;
-  },
-
-  /* ============================================================
-     Settings — no password security section
-  ============================================================ */
-  renderSettings(){
-    return`
-    <div class="page-header"><div class="page-header-left"><div class="page-title">Settings</div></div></div>
-    <div class="settings-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:760px">
-
-      <div class="card card-pad">
-        <div style="font-weight:600;margin-bottom:14px">Appearance</div>
-        <div class="form-group" style="margin-bottom:12px">
-          <label class="form-label">Theme</label>
-          <select id="s-theme" class="form-select" onchange="App.applyTheme(this.value)">
-            <option value="dark" ${(State.settings.theme||'dark')==='dark'?'selected':''}>Dark</option>
-            <option value="light" ${State.settings.theme==='light'?'selected':''}>Light</option>
+      <div class="report-controls">
+        <div class="form-group"><label class="form-label">From</label><input type="date" id="rpt-from" class="form-input" value="${f.from}"></div>
+        <div class="form-group"><label class="form-label">To</label><input type="date" id="rpt-to" class="form-input" value="${f.to}"></div>
+        ${isLedger&&State.accounts.length>0?`
+        <div class="form-group" style="flex:1;min-width:180px">
+          <label class="form-label">Account</label>
+          <select id="rpt-acc" class="form-select" onchange="State.savedLedgerAccId=this.value">
+            ${State.accounts.map(a=>`<option value="${a.id}" ${a.id===(State.savedLedgerAccId||selAccId)?'selected':''}>${Fmt.ac(a.id)} — ${a.name}</option>`).join('')}
           </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Currency Symbol</label>
-          <input id="s-currency" class="form-input" value="${State.settings.currency||'PKR'}" placeholder="PKR">
-          <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="App.saveCurrency()">Save Currency</button>
-        </div>
-      </div>
-
-      <div class="card card-pad">
-        <div style="font-weight:600;margin-bottom:14px">Data Export / Import</div>
-        <p style="font-size:12px;color:var(--text3);margin-bottom:14px;line-height:1.5">Export all your data as a JSON backup file, or restore from a previous backup.</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-ghost btn-sm" onclick="App.exportData()">⬇ Export JSON</button>
-          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-file').click()">⬆ Import JSON</button>
-          <input type="file" id="import-file" accept=".json" style="display:none" onchange="App.importData(this)">
+        </div>`:''}
+        <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="App.generateReport()">Generate</button>
+          <button class="btn btn-ghost" onclick="App.resetReport()">Reset</button>
         </div>
       </div>
+      <div id="rpt-out">${this._rptGenerated?this._renderRptBody(tab):`
+        <div class="card card-pad" style="text-align:center;padding:40px 16px">
+          <div style="font-size:26px;margin-bottom:10px;color:var(--text3)">≡</div>
+          <div style="color:var(--text3);font-size:13px">Select a date range and tap <strong style="color:var(--text)">Generate</strong></div>
+        </div>`}
+      </div>`;
+    },
 
-      <div class="card card-pad">
-        <div style="font-weight:600;margin-bottom:14px">Reset Data</div>
-        <p style="font-size:12px;color:var(--text3);margin-bottom:14px;line-height:1.5">Permanently delete all vouchers and entries. Accounts will be preserved.</p>
-        <button class="btn btn-danger btn-sm" onclick="App.resetData()">Reset All Data</button>
+    generateReport(){
+      const from=document.getElementById('rpt-from')?.value||'';
+      const to=document.getElementById('rpt-to')?.value||'';
+      if(from&&to&&from>to){Toast.show('From date cannot be after To date.','error');return;}
+      this._rptFilter={from,to};
+      if(window._reportTab==='ledger'){const s=document.getElementById('rpt-acc');if(s){State.savedLedgerAccId=parseInt(s.value);window._ledgerAccId=parseInt(s.value);}}
+      this._rptGenerated=true;
+      const out=document.getElementById('rpt-out');
+      if(out)out.innerHTML=this._renderRptBody(window._reportTab||'trial');
+      Toast.show('Report generated.','success');
+    },
+    resetReport(){this._rptFilter={from:Fmt.monthStart(),to:Fmt.today()};this._rptGenerated=false;this.navigate('reports');},
+    _renderRptBody(tab){return tab==='trial'?this.rptTrial():tab==='ledger'?this.rptLedger():tab==='income'?this.rptIncome():this.rptBalance();},
+    rptVouchers(){const{from,to}=this._rptFilter;return State.vouchers.filter(v=>{if(from&&v.date<from)return false;if(to&&v.date>to)return false;return true;});},
+    rptEntries(){const ids=new Set(this.rptVouchers().map(v=>v.id));return State.entries.filter(e=>ids.has(e.voucher_id));},
+    periodLabel(){const{from,to}=this._rptFilter;return`<strong style="color:var(--text)">${from?Fmt.date(from):'All'}</strong> — <strong style="color:var(--text)">${to?Fmt.date(to):'All'}</strong>`;},
+
+    rptTrial(){
+      const entries=this.rptEntries();let tdr=0,tcr=0;
+      const rows=State.accounts.map(a=>{
+        const trans={dr:entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0),cr:entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0)};
+        const ob=a.opening_balance||0;
+        const isNormal=['Asset','Expense'].includes(a.type);
+        const bal=isNormal?(trans.dr-trans.cr+ob):(trans.cr-trans.dr+ob);
+        const finalDr=isNormal?Math.max(bal,0):trans.dr;
+        const finalCr=isNormal?trans.cr:(bal>=0?bal:0)+(trans.cr);
+        tdr+=finalDr;tcr+=finalCr;return{a,dr:finalDr,cr:finalCr,ob};
+      }).filter(r=>r.dr>0||r.cr>0||r.ob>0);
+      const balanced=Math.abs(tdr-tcr)<0.001;
+      return`
+      <div style="font-size:12px;color:var(--text3);margin-bottom:10px">Period: ${this.periodLabel()}</div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>AC #</th><th>Account</th><th>Type</th><th class="text-right">Debit</th><th class="text-right">Credit</th></tr></thead>
+        <tbody>
+          ${rows.length===0?`<tr><td colspan="5"><div class="empty"><div class="empty-text">No accounts or transactions in this period.</div></div></td></tr>`:
+            rows.map(r=>`<tr>
+              <td class="mono" style="color:var(--accent)">${Fmt.ac(r.a.id)}</td>
+              <td>${r.a.name}</td>
+              <td><span class="badge badge-${r.a.type.toLowerCase()}">${r.a.type}</span></td>
+              <td class="mono text-right text-green">${r.dr>0?Fmt.num(r.dr):'—'}</td>
+              <td class="mono text-right text-red">${r.cr>0?Fmt.num(r.cr):'—'}</td>
+            </tr>`).join('')}
+          <tr style="border-top:2px solid var(--border2)">
+            <td colspan="3"><strong>TOTAL</strong></td>
+            <td class="mono text-right text-green fw-600">${Fmt.num(tdr)}</td>
+            <td class="mono text-right text-red fw-600">${Fmt.num(tcr)}</td>
+          </tr>
+          <tr><td colspan="5" class="text-center ${balanced?'text-green':'text-red'} mono fw-600" style="padding:12px">
+            ${balanced?'Trial Balance BALANCED':'IMBALANCE: '+Fmt.num(Math.abs(tdr-tcr))}
+          </td></tr>
+        </tbody>
+      </table></div></div>`;
+    },
+
+    rptLedger(){
+      const selId=State.savedLedgerAccId||window._ledgerAccId||(State.accounts[0]?.id||null);
+      const acc=selId?Cache.get(selId):null;
+      if(!acc)return'<div class="empty"><div class="empty-text">No accounts available.</div></div>';
+      const entries=this.rptEntries().filter(e=>e.account_id===selId);
+      const vMap=new Map(State.vouchers.map(v=>[v.id,v]));
+      const isNormal=['Asset','Expense'].includes(acc.type);
+      let running=acc.opening_balance||0;
+      const rows=entries.map(e=>({e,v:vMap.get(e.voucher_id)})).filter(x=>x.v)
+        .sort((a,b)=>a.v.date.localeCompare(b.v.date))
+        .map(({e,v})=>{const dr=e.debit||0,cr=e.credit||0;running+=isNormal?(dr-cr):(cr-dr);return{e,dr,cr,running,v};});
+      return`
+      <div style="font-size:12px;color:var(--text3);margin-bottom:10px">
+        <strong style="color:var(--text)">${Fmt.ac(acc.id)} — ${acc.name}</strong>
+        &nbsp;<span class="badge badge-${acc.type.toLowerCase()}">${acc.type}</span>
+        &nbsp;Period: ${this.periodLabel()}
+        ${(acc.opening_balance||0)!==0?`&nbsp;· Opening: <strong style="color:var(--accent)">${Fmt.num(acc.opening_balance)}</strong>`:''}
       </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>V#</th><th>Date</th><th>Narration</th><th class="text-right">Dr</th><th class="text-right">Cr</th><th class="text-right">Balance</th></tr></thead>
+        <tbody>
+          ${(acc.opening_balance||0)!==0?`<tr style="background:var(--surface2)">
+            <td class="mono text-muted">—</td><td class="mono text-muted">Opn</td><td class="text-muted">Opening Balance</td>
+            <td class="mono text-right">—</td><td class="mono text-right">—</td>
+            <td class="mono text-right fw-600" style="color:var(--accent)">${Fmt.num(acc.opening_balance)}</td>
+          </tr>`:''}
+          ${rows.length===0?`<tr><td colspan="6"><div class="empty"><div class="empty-text">No transactions for this account in this period.</div></div></td></tr>`:
+            rows.map(r=>`<tr>
+              <td class="mono" style="color:var(--accent)">${Fmt.vc(r.v.id)}</td>
+              <td class="mono" style="white-space:nowrap">${Fmt.date(r.v.date)}</td>
+              <td>${r.v.narration||'—'}</td>
+              <td class="mono text-right text-green">${r.dr>0?Fmt.num(r.dr):'—'}</td>
+              <td class="mono text-right text-red">${r.cr>0?Fmt.num(r.cr):'—'}</td>
+              <td class="mono text-right fw-600 ${r.running>=0?'text-green':'text-red'}">${Fmt.num(Math.abs(r.running))} ${r.running>=0?'Dr':'Cr'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table></div></div>`;
+    },
 
-      <div class="card card-pad" style="background:var(--surface2)">
-        <div style="font-weight:600;margin-bottom:10px">About</div>
-        <div style="font-size:12px;color:var(--text3);line-height:1.7">
-          <div>Version: <span style="color:var(--text);font-family:var(--font-mono)">1.0</span></div>
-          <div>Storage: <span style="color:var(--text)">IndexedDB (offline)</span></div>
-          <div>Accounts: <span style="color:var(--accent);font-family:var(--font-mono)">${State.accounts.length}</span></div>
-          <div>Vouchers: <span style="color:var(--accent);font-family:var(--font-mono)">${State.vouchers.length}</span></div>
-          <div>Entries: <span style="color:var(--accent);font-family:var(--font-mono)">${State.entries.length}</span></div>
+    rptIncome(){
+      const entries=this.rptEntries();
+      const iAccs=State.accounts.filter(a=>a.type==='Income');
+      const eAccs=State.accounts.filter(a=>a.type==='Expense');
+      const cal=a=>{
+        const dr=entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
+        const cr=entries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
+        return a.type==='Income'?cr-dr:dr-cr;
+      };
+      const ti=iAccs.reduce((s,a)=>s+cal(a),0),te=eAccs.reduce((s,a)=>s+cal(a),0),net=ti-te;
+      return`
+      <div style="font-size:12px;color:var(--text3);margin-bottom:10px">Period: ${this.periodLabel()}</div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>AC #</th><th>Account</th><th class="text-right">Amount</th></tr></thead>
+        <tbody>
+          <tr><td colspan="3" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--green)">INCOME</strong></td></tr>
+          ${iAccs.length===0?'<tr><td colspan="3" class="text-muted text-center" style="padding:8px">No income accounts</td></tr>':
+            iAccs.map(a=>`<tr><td class="mono" style="color:var(--accent);padding-left:20px">${Fmt.ac(a.id)}</td><td style="padding-left:20px">${a.name}</td><td class="mono text-right text-green">${Fmt.num(cal(a))}</td></tr>`).join('')}
+          <tr style="border-top:1px solid var(--border2)"><td></td><td><strong>Total Income</strong></td><td class="mono text-right text-green fw-600">${Fmt.num(ti)}</td></tr>
+          <tr><td colspan="3" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--yellow)">EXPENSES</strong></td></tr>
+          ${eAccs.length===0?'<tr><td colspan="3" class="text-muted text-center" style="padding:8px">No expense accounts</td></tr>':
+            eAccs.map(a=>`<tr><td class="mono" style="color:var(--accent);padding-left:20px">${Fmt.ac(a.id)}</td><td style="padding-left:20px">${a.name}</td><td class="mono text-right text-yellow">${Fmt.num(cal(a))}</td></tr>`).join('')}
+          <tr style="border-top:1px solid var(--border2)"><td></td><td><strong>Total Expenses</strong></td><td class="mono text-right fw-600 text-yellow">${Fmt.num(te)}</td></tr>
+          <tr style="border-top:2px solid var(--border2)"><td></td><td><strong>Net ${net>=0?'Profit':'Loss'}</strong></td><td class="mono text-right fw-600 ${net>=0?'text-green':'text-red'}">${Fmt.money(Math.abs(net))}</td></tr>
+        </tbody>
+      </table></div></div>`;
+    },
+
+    rptBalance(){
+      const periodEntries=this.rptEntries();
+      const assets=State.accounts.filter(a=>a.type==='Asset').map(a=>{
+        const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
+        const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
+        const ob=a.opening_balance||0;
+        const bal=dr-cr+ob;
+        return{a,bal};
+      }).filter(r=>r.bal!==0);
+      const liabilities=State.accounts.filter(a=>a.type==='Liability').map(a=>{
+        const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
+        const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
+        const ob=a.opening_balance||0;
+        const bal=cr-dr+ob;
+        return{a,bal};
+      }).filter(r=>r.bal!==0);
+      const iAccs=State.accounts.filter(a=>a.type==='Income');
+      const eAccs=State.accounts.filter(a=>a.type==='Expense');
+      const iBalance=iAccs.reduce((s,a)=>{
+        const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
+        const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
+        return s+(cr-dr);
+      },0);
+      const eBalance=eAccs.reduce((s,a)=>{
+        const dr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.debit||0),0);
+        const cr=periodEntries.filter(e=>e.account_id===a.id).reduce((s,e)=>s+(e.credit||0),0);
+        return s+(dr-cr);
+      },0);
+      const totalAssets=assets.reduce((s,r)=>s+r.bal,0);
+      const totalLiab=liabilities.reduce((s,r)=>s+r.bal,0);
+      const totalEq=iBalance-eBalance;
+      return`
+      <div style="font-size:12px;color:var(--text3);margin-bottom:10px">As at ${this._rptFilter.to?Fmt.date(this._rptFilter.to):Fmt.today()}</div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>ASSETS</th><th class="text-right">Amount</th></tr></thead>
+        <tbody>
+          ${assets.length===0?'<tr><td colspan="2" class="text-muted text-center" style="padding:8px">No asset accounts</td></tr>':assets.map(r=>`<tr><td style="padding-left:16px">${Fmt.ac(r.a.id)} — ${r.a.name}</td><td class="mono text-right text-green">${Fmt.money(r.bal)}</td></tr>`).join('')}
+          <tr style="border-top:1px solid var(--border2)"><td style="padding-left:16px"><strong>Total Assets</strong></td><td class="mono text-right text-green fw-600">${Fmt.money(totalAssets)}</td></tr>
+        </tbody>
+      </table></div></div>
+      <div class="card" style="margin-top:16px"><div class="table-wrap"><table>
+        <thead><tr><th>LIABILITIES & EQUITY</th><th class="text-right">Amount</th></tr></thead>
+        <tbody>
+          <tr><td colspan="2" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--red)">LIABILITIES</strong></td></tr>
+          ${liabilities.length===0?'<tr><td colspan="2" class="text-muted text-center" style="padding:8px">No liability accounts</td></tr>':liabilities.map(r=>`<tr><td style="padding-left:20px">${Fmt.ac(r.a.id)} — ${r.a.name}</td><td class="mono text-right text-red">${Fmt.money(r.bal)}</td></tr>`).join('')}
+          <tr style="border-top:1px solid var(--border2)"><td style="padding-left:20px"><strong>Total Liabilities</strong></td><td class="mono text-right text-red fw-600">${Fmt.money(totalLiab)}</td></tr>
+          <tr><td colspan="2" style="background:var(--surface2);padding:8px 14px"><strong style="color:var(--green)">EQUITY</strong></td></tr>
+          <tr><td style="padding-left:20px">Net Profit/Loss</td><td class="mono text-right ${totalEq>=0?'text-green':'text-red'} fw-600">${Fmt.money(totalEq)}</td></tr>
+          <tr style="border-top:2px solid var(--border2)"><td><strong>Total Liabilities & Equity</strong></td><td class="mono text-right fw-600 ${Math.abs(totalAssets-(totalLiab+totalEq))<0.01?'text-green':'text-red'}">${Fmt.money(totalLiab+totalEq)}</td></tr>
+        </tbody>
+      </table></div></div>
+      ${Math.abs(totalAssets-(totalLiab+totalEq))<0.01?'':'<div style="color:var(--red);padding:12px;margin-top:12px"><strong>⚠ Balance Sheet does not balance</strong></div>'}`;
+    },
+
+    /* ============================================================
+       Settings
+    ============================================================ */
+    renderSettings(){
+      return`
+      <div class="page-header"><div class="page-header-left"><div class="page-title">Settings</div></div></div>
+      <div class="settings-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:760px">
+
+        <div class="card card-pad">
+          <div style="font-weight:600;margin-bottom:14px">Appearance</div>
+          <div class="form-group" style="margin-bottom:12px">
+            <label class="form-label">Theme</label>
+            <select id="s-theme" class="form-select" onchange="App.applyTheme(this.value)">
+              <option value="dark" ${(State.settings.theme||'dark')==='dark'?'selected':''}>Dark</option>
+              <option value="light" ${State.settings.theme==='light'?'selected':''}>Light</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Currency Symbol</label>
+            <input id="s-currency" class="form-input" value="${State.settings.currency||'PKR'}" placeholder="PKR">
+            <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="App.saveCurrency()">Save Currency</button>
+          </div>
         </div>
-      </div>
 
-      <div class="card card-pad">
-        <div style="font-weight:600;margin-bottom:10px">Account</div>
-        <button class="btn btn-danger btn-sm" onclick="Auth.logout()">🚪 Sign Out</button>
-      </div>
+        <div class="card card-pad">
+          <div style="font-weight:600;margin-bottom:14px">Data Export / Import</div>
+          <p style="font-size:12px;color:var(--text3);margin-bottom:14px;line-height:1.5">Export all your data as a JSON backup file, or restore from a previous backup.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="App.exportData()">⬇ Export JSON</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-file').click()">⬆ Import JSON</button>
+            <input type="file" id="import-file" accept=".json" style="display:none" onchange="App.importData(this)">
+          </div>
+        </div>
 
-    </div>`;
-  },
+        <div class="card card-pad">
+          <div style="font-weight:600;margin-bottom:14px">Reset Data</div>
+          <p style="font-size:12px;color:var(--text3);margin-bottom:14px;line-height:1.5">Permanently delete all vouchers and entries. Accounts will be preserved.</p>
+          <button class="btn btn-danger btn-sm" onclick="App.resetData()">Reset All Data</button>
+        </div>
 
-  async applyTheme(t){document.documentElement.setAttribute('data-theme',t);await this.saveSetting('theme',t);Toast.show('Theme updated.','info');},
-  async saveCurrency(){
-    const c=document.getElementById('s-currency').value.trim()||'PKR';
-    if(Fmt.currency===c){Toast.show('No changes.','info');return;}
-    if(!confirm(`Change currency to ${c}?\n(This will be used for all future displays)`))return;
-    await this.saveSetting('currency',c);Fmt.currency=c;Toast.show('Currency updated.','success');
-  },
-  exportData(){
-    const d={version:1,exported:new Date().toISOString(),accounts:State.accounts,vouchers:State.vouchers,entries:State.entries};
-    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(d,null,2)],{type:'application/json'}));a.download=`ledger-backup-${Fmt.today()}.json`;a.click();
-    Toast.show('Data exported.','success');
-  },
-  async importData(input){
-    const file=input.files[0];if(!file)return;let d;
-    try{d=JSON.parse(await file.text());}catch{Toast.show('Invalid JSON file.','error');input.value='';return;}
-    if(!d.accounts||!d.vouchers||!d.entries){Toast.show('Invalid backup format.','error');input.value='';return;}
-    if(!confirm(`Overwrite ALL current data?\n${d.accounts.length} accounts · ${d.vouchers.length} vouchers · ${d.entries.length} entries`))return;
-    const backup={version:1,backed_up:new Date().toISOString(),accounts:State.accounts,vouchers:State.vouchers,entries:State.entries};
-    await DB.put('settings',{key:'_last_backup',value:JSON.stringify(backup)});
-    await DB.clr('accounts');await DB.clr('vouchers');await DB.clr('entries');
-    for(const a of d.accounts)await DB.put('accounts',a);
-    for(const v of d.vouchers)await DB.put('vouchers',v);
-    for(const e of d.entries)await DB.put('entries',e);
-    await this.loadAll();Toast.show('Data imported! Backup saved.','success');this.navigate('dashboard');input.value='';
-  },
-  async resetData(){
-    if(!confirm('Permanently delete all vouchers and entries? Accounts kept.'))return;
-    if(prompt('Type RESET to confirm:')!=='RESET'){Toast.show('Reset cancelled.','info');return;}
-    await DB.clr('vouchers');await DB.clr('entries');await this.loadAll();
-    Toast.show('All vouchers deleted.','info');this.navigate('dashboard');this.updateFooter();
-  },
+        <div class="card card-pad" style="background:var(--surface2)">
+          <div style="font-weight:600;margin-bottom:10px">About</div>
+          <div style="font-size:12px;color:var(--text3);line-height:1.7">
+            <div>Version: <span style="color:var(--text);font-family:var(--font-mono)">1.0</span></div>
+            <div>Storage: <span style="color:var(--text)">Supabase (cloud)</span></div>
+            <div>Accounts: <span style="color:var(--accent);font-family:var(--font-mono)">${State.accounts.length}</span></div>
+            <div>Vouchers: <span style="color:var(--accent);font-family:var(--font-mono)">${State.vouchers.length}</span></div>
+            <div>Entries: <span style="color:var(--accent);font-family:var(--font-mono)">${State.entries.length}</span></div>
+          </div>
+        </div>
 
-  /* ── Seed ── */
-  async seedIfEmpty(){
-    if(State.accounts.length>0)return;
-    const defaults=[
-      {name:'Cash',type:'Asset',description:'Physical cash on hand',opening_balance:0},
-      {name:'Bank Account',type:'Asset',description:'Primary bank account',opening_balance:0},
-      {name:'Accounts Receivable',type:'Asset',description:'Money owed to you',opening_balance:0},
-      {name:'Accounts Payable',type:'Liability',description:'Money you owe',opening_balance:0},
-      {name:'Loan Payable',type:'Liability',description:'Outstanding loans',opening_balance:0},
-      {name:'Sales Revenue',type:'Income',description:'Revenue from sales',opening_balance:0},
-      {name:'Service Income',type:'Income',description:'Revenue from services',opening_balance:0},
-      {name:'Rent Expense',type:'Expense',description:'Rent payments',opening_balance:0},
-      {name:'Salary Expense',type:'Expense',description:'Employee salaries',opening_balance:0},
-      {name:'Utilities',type:'Expense',description:'Utility bills',opening_balance:0},
-    ];
-    for(const a of defaults)await DB.put('accounts',a);
-    await this.loadAll();Toast.show('Welcome! Default accounts created.','info',4000);
-  }
-};
+        <div class="card card-pad">
+          <div style="font-weight:600;margin-bottom:10px">Account</div>
+          <button class="btn btn-danger btn-sm" onclick="Auth.logout()">🚪 Sign Out</button>
+        </div>
 
-document.addEventListener('DOMContentLoaded',async()=>{
-  // Initialize Supabase
-  await SupabaseClient.init();
-  
-  // Check if user is authenticated before initializing app
-  if(Auth.isAuthenticated()){
-    document.getElementById('login-screen').style.display='none';
-    document.getElementById('app').style.display='flex';
-    await App.init();await App.seedIfEmpty();App.navigate('dashboard');
+      </div>`;
+    },
+
+    async applyTheme(t){document.documentElement.setAttribute('data-theme',t);await this.saveSetting('theme',t);Toast.show('Theme updated.','info');},
+    async saveCurrency(){
+      const c=document.getElementById('s-currency').value.trim()||'PKR';
+      if(Fmt.currency===c){Toast.show('No changes.','info');return;}
+      if(!confirm(`Change currency to ${c}?\n(This will be used for all future displays)`))return;
+      await this.saveSetting('currency',c);Fmt.currency=c;Toast.show('Currency updated.','success');
+    },
+    exportData(){
+      const d={version:1,exported:new Date().toISOString(),accounts:State.accounts,vouchers:State.vouchers,entries:State.entries};
+      const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(d,null,2)],{type:'application/json'}));a.download=`ledger-backup-${Fmt.today()}.json`;a.click();
+      Toast.show('Data exported.','success');
+    },
+    async importData(input){
+      const file=input.files[0];if(!file)return;let d;
+      try{d=JSON.parse(await file.text());}catch{Toast.show('Invalid JSON file.','error');input.value='';return;}
+      if(!d.accounts||!d.vouchers||!d.entries){Toast.show('Invalid backup format.','error');input.value='';return;}
+      if(!confirm(`Overwrite ALL current data?\n${d.accounts.length} accounts · ${d.vouchers.length} vouchers · ${d.entries.length} entries`))return;
+      
+      await DB.utils.clearAllData();
+      
+      for(const a of d.accounts) await DB.accounts.add(a);
+      for(const v of d.vouchers) await DB.vouchers.add(v);
+      for(const e of d.entries) await DB.entries.add(e);
+      
+      await this.loadAll();
+      Toast.show('Data imported!','success');
+      this.navigate('dashboard');
+      input.value='';
+    },
+    async resetData(){
+      if(!confirm('Permanently delete all vouchers and entries? Accounts kept.'))return;
+      if(prompt('Type RESET to confirm:')!=='RESET'){Toast.show('Reset cancelled.','info');return;}
+      
+      for(const e of State.entries) await DB.entries.delete(e.id);
+      for(const v of State.vouchers) await DB.vouchers.delete(v.id);
+      
+      await this.loadAll();
+      Toast.show('All vouchers deleted.','info');
+      this.navigate('dashboard');
+      this.updateFooter();
+    },
+
+    async seedIfEmpty(){
+      if(State.accounts.length>0)return;
+      const defaults=[
+        {name:'Cash',type:'Asset',description:'Physical cash on hand',opening_balance:0},
+        {name:'Bank Account',type:'Asset',description:'Primary bank account',opening_balance:0},
+        {name:'Accounts Receivable',type:'Asset',description:'Money owed to you',opening_balance:0},
+        {name:'Accounts Payable',type:'Liability',description:'Money you owe',opening_balance:0},
+        {name:'Loan Payable',type:'Liability',description:'Outstanding loans',opening_balance:0},
+        {name:'Sales Revenue',type:'Income',description:'Revenue from sales',opening_balance:0},
+        {name:'Service Income',type:'Income',description:'Revenue from services',opening_balance:0},
+        {name:'Rent Expense',type:'Expense',description:'Rent payments',opening_balance:0},
+        {name:'Salary Expense',type:'Expense',description:'Employee salaries',opening_balance:0},
+        {name:'Utilities',type:'Expense',description:'Utility bills',opening_balance:0},
+      ];
+      for(const a of defaults) await DB.accounts.add(a);
+      await this.loadAll();Toast.show('Welcome! Default accounts created.','info',4000);
+    }
+  };
+
+  // Attach all global objects to window
+  window.State = State;
+  window.Cache = Cache;
+  window.Acct = Acct;
+  window.Fmt = Fmt;
+  window.Toast = Toast;
+  window.Auth = Auth;
+  window.App = App;
+
+  // Start the app
+  const isAuth = await Auth.isAuthenticated();
+  if (isAuth) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    await App.init();
+    await App.seedIfEmpty();
+    App.navigate('dashboard');
   } else {
-    document.getElementById('login-screen').style.display='flex';
-    document.getElementById('app').style.display='none';
+    document.getElementById('login-screen').style.display = 'flex';
+    document.getElementById('app').style.display = 'none';
   }
-});
+})();
 </script>
-<script src="supabase-client.js"></script>
 </body>
 </html>
