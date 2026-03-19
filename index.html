@@ -472,7 +472,8 @@ mark{background:rgba(79,142,247,.2);color:var(--accent);border-radius:2px;paddin
   const SUPABASE_URL = 'https://umswoglqoddirbxvhzbf.supabase.co';
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVtc3dvZ2xxb2RkaXJieHZoemJmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MTYxNTEsImV4cCI6MjA4OTQ5MjE1MX0.eh5WWHo_Usa6D8FzLQakrvRc3mMWbA3qUU21ue03fTs';
 
-  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2');
+  // ✅ FIXED: Use esm.sh CDN for reliable ESM import
+  const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   // Helper to get current user id (used by database functions)
